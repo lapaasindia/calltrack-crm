@@ -1,0 +1,9 @@
+node_modules/
+client/node_modules/
+client/dist/
+data/
+backups/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
