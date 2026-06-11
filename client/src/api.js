@@ -45,10 +45,13 @@ export function fmtDateTime(utcIso) {
   });
 }
 
+// Business dates are IST calendar dates ('YYYY-MM-DD'). Parse as UTC and
+// format as UTC so the literal calendar date renders in EVERY browser
+// timezone — parsing without 'Z' would shift it by the local offset.
 export function fmtDate(dateStr) {
   if (!dateStr) return '';
-  return new Date(`${dateStr}T00:00:00`).toLocaleDateString('en-IN', {
-    day: 'numeric', month: 'short', year: 'numeric',
+  return new Date(`${dateStr}T00:00:00Z`).toLocaleDateString('en-IN', {
+    timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric',
   });
 }
 
@@ -56,13 +59,23 @@ export function todayIstDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
+export const IST_OFFSET_MS = 330 * 60 * 1000;
+
+// Interpret a datetime-local input value ('YYYY-MM-DDTHH:mm') as IST wall
+// time and return the UTC instant. new Date(value) would interpret it in the
+// browser's timezone instead — wrong whenever that isn't IST.
+export function dtLocalToUtcIso(dtLocal) {
+  const [d, t] = dtLocal.split('T');
+  const [y, m, day] = d.split('-').map(Number);
+  const [h, min] = t.split(':').map(Number);
+  return new Date(Date.UTC(y, m - 1, day, h, min) - IST_OFFSET_MS).toISOString();
+}
+
 // Is this UTC instant before the start of today (IST)? → overdue badge
-export function isOverdue(utcIso, dateOnly) {
-  const today = todayIstDate();
-  if (dateOnly) return utcIso < today;
+export function isOverdue(utcIso) {
   const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })
     .format(new Date(utcIso));
-  return istDate < today;
+  return istDate < todayIstDate();
 }
 
 // Render a WhatsApp template body with lead/deal context.

@@ -72,14 +72,23 @@ router.get('/sources', (req, res) => {
   res.json(rows.map((r) => r.source));
 });
 
-// Live duplicate check for the add-lead form.
+// Live duplicate check for the add-lead form. Callers learn THAT a duplicate
+// exists, but details of another caller's lead are not disclosed.
 router.get('/check-phone', (req, res) => {
   const norm = normalizePhone(req.query.phone);
   if (!norm.ok) return res.json({ valid: false, reason: norm.reason });
   const existing = db.prepare(
     'SELECT id, name, stage, assigned_to FROM leads WHERE phone = ? AND deleted_at IS NULL'
   ).get(norm.phone);
-  res.json({ valid: true, phone: norm.phone, duplicate: existing || null });
+  if (!existing) return res.json({ valid: true, phone: norm.phone, duplicate: null });
+  const mine = req.user.role === 'admin' || existing.assigned_to === req.user.id;
+  res.json({
+    valid: true,
+    phone: norm.phone,
+    duplicate: mine
+      ? { id: existing.id, name: existing.name, stage: existing.stage, mine: true }
+      : { mine: false },
+  });
 });
 
 router.post('/', (req, res) => {
@@ -89,10 +98,16 @@ router.post('/', (req, res) => {
   if (!norm.ok) return res.status(400).json({ error: `Invalid phone number (${norm.reason})` });
 
   const existing = db.prepare(
-    'SELECT id, name FROM leads WHERE phone = ? AND deleted_at IS NULL'
+    'SELECT id, name, assigned_to FROM leads WHERE phone = ? AND deleted_at IS NULL'
   ).get(norm.phone);
   if (existing) {
-    return res.status(409).json({ error: 'A lead with this phone already exists', existing });
+    const mine = req.user.role === 'admin' || existing.assigned_to === req.user.id;
+    return res.status(409).json({
+      error: mine
+        ? 'A lead with this phone already exists'
+        : 'A lead with this phone already exists (assigned to another team member)',
+      existing: mine ? { id: existing.id, name: existing.name } : null,
+    });
   }
 
   // Callers can only create leads assigned to themselves.
@@ -157,44 +172,66 @@ router.get('/:id', loadLead, (req, res) => {
 router.patch('/:id', loadLead, (req, res) => {
   const lead = req.lead;
 
-  // Stage change (manual): callers and admins; recorded in lead_events.
-  if (req.body.stage !== undefined && req.body.stage !== lead.stage) {
+  // Validate everything BEFORE writing anything, so a later failure can't
+  // leave a half-applied update (e.g. stage changed but phone rejected).
+  const wantsStageChange = req.body.stage !== undefined && req.body.stage !== lead.stage;
+  if (wantsStageChange) {
     if (!STAGES.includes(req.body.stage)) return res.status(400).json({ error: 'Invalid stage' });
     if (req.body.stage === 'won') {
       return res.status(400).json({ error: 'Use the Win Deal flow to mark a lead won' });
     }
-    changeStage(lead.id, lead.stage, req.body.stage, req.user.id, req.body.lost_reason || null);
   }
-
-  // Assignment is admin-only.
-  if (req.body.assigned_to !== undefined) {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only admin can reassign leads' });
-    const newAssignee = req.body.assigned_to ? Number(req.body.assigned_to) : null;
-    db.prepare('UPDATE leads SET assigned_to = ?, updated_at = ? WHERE id = ?')
-      .run(newAssignee, nowUtc(), lead.id);
-    // Pending follow-up moves with the lead so it doesn't rot in the old caller's queue.
-    if (newAssignee) {
-      db.prepare("UPDATE follow_ups SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
-        .run(newAssignee, lead.id);
-    }
+  if (req.body.assigned_to !== undefined && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admin can reassign leads' });
   }
-
-  const fields = ['name', 'alt_phone', 'email', 'city', 'source', 'notes'];
-  for (const f of fields) {
-    if (req.body[f] !== undefined) {
-      db.prepare(`UPDATE leads SET ${f} = ?, updated_at = ? WHERE id = ?`)
-        .run(req.body[f] === '' ? null : req.body[f], nowUtc(), lead.id);
-    }
-  }
+  let normPhone = null;
   if (req.body.phone !== undefined) {
     const norm = normalizePhone(req.body.phone);
     if (!norm.ok) return res.status(400).json({ error: `Invalid phone number (${norm.reason})` });
-    const dup = db.prepare(
-      'SELECT id FROM leads WHERE phone = ? AND deleted_at IS NULL AND id != ?'
-    ).get(norm.phone, lead.id);
-    if (dup) return res.status(409).json({ error: 'Another lead already has this phone', existing: dup });
-    db.prepare('UPDATE leads SET phone = ?, phone_raw = ?, updated_at = ? WHERE id = ?')
-      .run(norm.phone, String(req.body.phone), nowUtc(), lead.id);
+    normPhone = norm.phone;
+  }
+
+  try {
+    db.transaction(() => {
+      if (wantsStageChange) {
+        changeStage(lead.id, lead.stage, req.body.stage, req.user.id, req.body.lost_reason || null);
+      }
+      if (req.body.assigned_to !== undefined) {
+        const newAssignee = req.body.assigned_to ? Number(req.body.assigned_to) : null;
+        db.prepare('UPDATE leads SET assigned_to = ?, updated_at = ? WHERE id = ?')
+          .run(newAssignee, nowUtc(), lead.id);
+        // Pending follow-up moves with the lead so it doesn't rot in the old caller's queue.
+        if (newAssignee) {
+          db.prepare("UPDATE follow_ups SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
+            .run(newAssignee, lead.id);
+        }
+      }
+      const fields = ['name', 'alt_phone', 'email', 'city', 'source', 'notes'];
+      for (const f of fields) {
+        if (req.body[f] !== undefined) {
+          db.prepare(`UPDATE leads SET ${f} = ?, updated_at = ? WHERE id = ?`)
+            .run(req.body[f] === '' ? null : req.body[f], nowUtc(), lead.id);
+        }
+      }
+      if (normPhone) {
+        const dup = db.prepare(
+          'SELECT id FROM leads WHERE phone = ? AND deleted_at IS NULL AND id != ?'
+        ).get(normPhone, lead.id);
+        if (dup) {
+          const err = new Error('Another lead already has this phone');
+          err.status = 409;
+          throw err;
+        }
+        db.prepare('UPDATE leads SET phone = ?, phone_raw = ?, updated_at = ? WHERE id = ?')
+          .run(normPhone, String(req.body.phone), nowUtc(), lead.id);
+      }
+    })();
+  } catch (err) {
+    // The unique phone index can also fire under a concurrent write race.
+    if (err.status === 409 || String(err.message).includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Another lead already has this phone' });
+    }
+    throw err;
   }
   res.json({ ok: true });
 });

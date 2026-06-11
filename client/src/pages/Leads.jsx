@@ -61,10 +61,13 @@ function AddLeadModal({ onClose, onAdded }) {
           <label>Phone *</label>
           <input inputMode="tel" value={form.phone} onChange={set('phone')} placeholder="98765 43210" />
           {phoneCheck && !phoneCheck.valid && <div className="err">Not a valid Indian mobile number</div>}
-          {dup && (
+          {dup && dup.mine && (
             <div className="err">
               Already exists: <Link to={`/leads/${dup.id}`}>{dup.name}</Link> ({STAGE_LABELS[dup.stage]})
             </div>
+          )}
+          {dup && !dup.mine && (
+            <div className="err">A lead with this number already exists (another team member's — ask admin)</div>
           )}
         </div>
         <div className="field">
@@ -112,6 +115,7 @@ export default function Leads() {
   const [users, setUsers] = useState([]);
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [bulkTo, setBulkTo] = useState('');
   const searchTimer = useRef();
   const [searchText, setSearchText] = useState(params.get('q') || '');
 
@@ -200,10 +204,12 @@ export default function Leads() {
       {user.role === 'admin' && selected.size > 0 && (
         <div className="card" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <b>{selected.size} selected</b>
-          <select id="bulk-to" style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}>
+          <select value={bulkTo} onChange={(e) => setBulkTo(e.target.value)}
+            style={{ padding: 8, border: '1px solid var(--line)', borderRadius: 8 }}>
+            <option value="">Pick caller…</option>
             {users.filter((u) => u.role === 'caller').map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
           </select>
-          <button className="btn small" onClick={() => bulkAssign(document.getElementById('bulk-to').value)}>Assign</button>
+          <button className="btn small" disabled={!bulkTo} onClick={() => bulkAssign(bulkTo)}>Assign</button>
           <button className="btn small secondary" onClick={() => bulkAssign(null, true)}>Distribute equally</button>
           <button className="btn small secondary" onClick={() => setSelected(new Set())}>Clear</button>
         </div>

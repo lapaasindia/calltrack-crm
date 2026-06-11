@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate } from '../api.js';
+import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso } from '../api.js';
 import { useApp } from '../App.jsx';
 import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton } from '../components.jsx';
 
@@ -43,10 +43,13 @@ function WinDealModal({ lead, onClose, onSaved }) {
     if (!Number.isFinite(total) || total <= 0 || emiCount < 2) { setInstallments([]); return; }
     const per = Math.floor(total / emiCount / 100) * 100;
     const rows = [];
-    const today = todayIstDate();
+    // Pure UTC calendar math: parsing the IST date without 'Z' would shift it
+    // by the browser offset, and setMonth() overflows month-ends (31 Jan + 1
+    // month = 3 Mar) — clamp to the target month's last day instead.
+    const [y, m, day] = todayIstDate().split('-').map(Number);
     for (let i = 0; i < emiCount; i++) {
-      const d = new Date(`${today}T00:00:00`);
-      d.setMonth(d.getMonth() + i);
+      const lastDay = new Date(Date.UTC(y, m - 1 + i + 1, 0)).getUTCDate();
+      const d = new Date(Date.UTC(y, m - 1 + i, Math.min(day, lastDay)));
       rows.push({
         amount_rupees: (i === emiCount - 1 ? total - per * (emiCount - 1) : per) / 100,
         due_date: d.toISOString().slice(0, 10),
@@ -163,6 +166,7 @@ function PaymentModal({ deal, onClose, onSaved }) {
       onClose();
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
       setSaving(false);
     }
   };
@@ -219,7 +223,7 @@ function FollowUpModal({ lead, onClose, onSaved }) {
   const save = async () => {
     try {
       await api.put(`/api/leads/${lead.id}/follow-up`, {
-        due_at: new Date(dueAt).toISOString(), reason: reason || 'Follow-up',
+        due_at: dtLocalToUtcIso(dueAt), reason: reason || 'Follow-up',
       });
       showToast('Follow-up scheduled ✓');
       onSaved(); onClose();

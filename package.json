@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server/index.js",
     "seed": "node server/seed.js",
-    "test": "node --test server/test/",
+    "test": "node --test server/test/*.test.js",
     "build": "npm --prefix client run build",
     "setup": "npm install && npm --prefix client install && npm --prefix client run build && node server/seed.js",
     "install-autostart": "node scripts/install-autostart.js"

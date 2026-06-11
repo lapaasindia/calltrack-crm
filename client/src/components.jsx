@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api, renderTemplate, waLink, rupees, fmtDate } from './api.js';
+import { api, renderTemplate, waLink, rupees, fmtDate, dtLocalToUtcIso, IST_OFFSET_MS } from './api.js';
 import { useApp } from './App.jsx';
 
 export function Modal({ title, onClose, children }) {
@@ -55,13 +55,13 @@ const OUTCOMES = {
   support: [['resolved', '✅ Resolved'], ['open', '🔄 Still open'], ['escalated', '🆙 Escalated']],
 };
 
-// Quick follow-up presets → datetime-local value in local (IST) time.
+// Quick follow-up presets → datetime-local value representing IST wall time
+// (computed via a shifted clock read with getUTC*, so the browser's own
+// timezone never leaks in).
 function followUpPreset(daysAhead, hour) {
-  const d = new Date();
-  d.setDate(d.getDate() + daysAhead);
-  d.setHours(hour, 0, 0, 0);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  const d = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + daysAhead, hour, 0));
+  return d.toISOString().slice(0, 16);
 }
 
 export function LogCallModal({ lead, defaultType = 'sales', onClose, onSaved }) {
@@ -78,7 +78,7 @@ export function LogCallModal({ lead, defaultType = 'sales', onClose, onSaved }) 
     setSaving(true);
     try {
       const body = { call_type: callType, disposition, outcome, notes };
-      if (followUpAt) body.next_follow_up_at = new Date(followUpAt).toISOString();
+      if (followUpAt) body.next_follow_up_at = dtLocalToUtcIso(followUpAt);
       const res = await api.post(`/api/leads/${lead.id}/calls`, body);
       showToast('Call logged ✓');
       onSaved?.(res);

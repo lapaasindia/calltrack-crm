@@ -19,13 +19,16 @@ export default function Today() {
   const { user } = useApp();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
   const [viewUser, setViewUser] = useState('me');
   const [users, setUsers] = useState([]);
   const [logging, setLogging] = useState(null); // {lead, type}
 
   const load = useCallback(() => {
     const q = user.role === 'admin' && viewUser !== 'me' ? `?user_id=${viewUser}` : '';
-    api.get(`/api/today${q}`).then(setData).catch(() => {});
+    api.get(`/api/today${q}`)
+      .then((d) => { setData(d); setError(null); })
+      .catch((err) => setError(err.message));
   }, [user.role, viewUser]);
 
   useEffect(() => { load(); }, [load]);
@@ -40,7 +43,18 @@ export default function Today() {
     }
   }, [user.role]);
 
-  if (!data) return null;
+  if (!data) {
+    if (error) {
+      return (
+        <div className="card empty">
+          <div className="big">📡</div>
+          Could not load your queue: {error}
+          <div style={{ marginTop: 10 }}><button className="btn small" onClick={load}>Try again</button></div>
+        </div>
+      );
+    }
+    return null;
+  }
   const { stats } = data;
   const today = todayIstDate();
 
