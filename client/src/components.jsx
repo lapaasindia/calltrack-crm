@@ -175,7 +175,13 @@ export function WhatsAppButton({ lead, context = {} }) {
       {open && data && (
         <Modal title={`WhatsApp ${lead.name}`} onClose={() => setOpen(false)}>
           <div className="row-list">
-            {data.templates.map((t) => {
+            {data.templates.filter((t) => {
+              // Hide templates whose placeholders we can't fill in this context
+              // (e.g. payment reminder when there's no amount due).
+              if (t.body.includes('{amount_due}') && !ctx.amount_due) return false;
+              if (t.body.includes('{due_date}') && !ctx.due_date) return false;
+              return true;
+            }).map((t) => {
               const text = renderTemplate(t.body, { ...ctx, company: data.company });
               return (
                 <a key={t.id} className="lead-row" href={waLink(lead.phone, text)}

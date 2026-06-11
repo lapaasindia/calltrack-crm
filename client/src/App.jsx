@@ -49,6 +49,10 @@ function Nav({ user, dueCount, onLogout }) {
           <div><button onClick={onLogout}>Log out</button></div>
         </div>
       </aside>
+      <div className="mobile-topbar">
+        <span className="brand">Call<b>Track</b></span>
+        <span className="who">{user.full_name.split(' ')[0]} <button onClick={onLogout}>Log out</button></span>
+      </div>
       <div className="bottom-nav">
         {items.slice(0, 5).map((it) => (
           <NavLink key={it.to} to={it.to} end={it.to === '/'}>
