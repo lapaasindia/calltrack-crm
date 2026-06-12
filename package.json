@@ -53,6 +53,7 @@
     ],
     "mac": {
       "category": "public.app-category.business",
+      "artifactName": "CallTrack-CRM-${version}-mac-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -61,6 +62,7 @@
       ]
     },
     "win": {
+      "artifactName": "CallTrack-CRM-Setup-${version}-win-${arch}.${ext}",
       "target": [
         {
           "target": "nsis",
