@@ -46,7 +46,21 @@ CallTrack is **local-first**: one computer in your office is the **main computer
 3. **Phones need no install** — callers open the host's address in their phone browser
    (same WiFi) and "Add to Home Screen". Tap-to-call and WhatsApp buttons work natively.
 
-First login: **`admin` / `admin123`** — change it immediately in Settings → Team.
+### Default logins
+
+A fresh install always creates one admin account. If you installed the demo data
+(`npm run setup` / `npm run seed`), two sample callers are added too.
+
+| Username | Password | Role | Created by |
+|---|---|---|---|
+| `admin` | `admin123` | Admin | every install |
+| `priya` | `caller123` | Caller | demo data only |
+| `rahul` | `caller123` | Caller | demo data only |
+
+> ⚠️ **Change these immediately.** Log in as `admin`, go to **Settings → Team**, change
+> the admin password, and either delete the demo callers or use **Settings → Clear demo
+> data**. Anyone on your office WiFi can reach the app, so the defaults are for first
+> setup only — never leave them in place on a real deployment.
 
 > Moving existing data in? On the setup screen choose **"I have a backup file — restore my
 > data"** and pick your `crm-YYYY-MM-DD.sqlite` backup file.
