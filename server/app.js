@@ -33,9 +33,10 @@ import taskRoutes from './routes/tasks.js';
 import deviceRoutes from './routes/devices.js';
 import aiRoutes from './routes/ai.js';
 import { startAiWorker } from './lib/ai.js';
+import { startRetentionJob } from './lib/recordingsRetention.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const APP_VERSION = '1.0.1';
+export const APP_VERSION = '1.1.0';
 
 export function lanAddresses() {
   const addrs = [];
@@ -173,6 +174,7 @@ export function startServer({ port = 3000 } = {}) {
     const server = app.listen(port, '0.0.0.0', () => {
       startBackupScheduler();
       startAiWorker();
+      startRetentionJob();
       const hostname = os.hostname().replace(/\.local$/, '');
       resolve({
         server,

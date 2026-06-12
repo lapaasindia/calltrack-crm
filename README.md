@@ -14,13 +14,17 @@ Built for small sales/calling teams (2–15 callers + a manager): every call log
 
 ## 📥 Download
 
-**Latest version: v1.0.1** — these links always point to the newest release:
+**Latest version: v1.1.0** — these links always point to the newest release:
 
 | Platform | Download |
 |---|---|
-| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM 1.0.1 — mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.0.1-mac-arm64.dmg) |
-| **Mac** (Intel) | [CallTrack-CRM 1.0.1 — mac-intel.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.0.1-mac-intel.dmg) |
-| **Windows** 10/11 (64-bit) | [CallTrack-CRM 1.0.1 Setup — win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.0.1-win-x64.exe) |
+| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.0-mac-arm64.dmg) |
+| **Mac** (Intel) | [CallTrack-CRM mac-intel.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.0-mac-intel.dmg) |
+| **Windows** 10/11 (64-bit) | [CallTrack-CRM Setup win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.1.0-win-x64.exe) |
+
+**📱 Android call-capture app** (optional): once the desktop app is running, install
+it on callers' Android phones from `http://<office-server>:3000/download/calltrack.apk`
+and pair via QR — see the **[mobile guide](docs/MOBILE.md)**.
 
 All versions: [Releases page](https://github.com/lapaasindia/calltrack-crm/releases).
 
@@ -62,9 +66,21 @@ First login: **`admin` / `admin123`** — change it immediately in Settings → 
 - **Reports**: per-caller dials/connects/conversions by day, connect rate, team leaderboard vs targets (today/week/month), funnel conversion, revenue by product, lead-source performance — every report exports to CSV
 - WhatsApp template editor, product catalog, daily targets per caller
 
+**📱 Android call capture (optional) — [full guide](docs/MOBILE.md):**
+- A companion Android app auto-captures every call: known numbers attach to the
+  right lead, **unknown numbers become leads with one tap**, recordings upload to
+  the office computer — no manual logging
+- **Local AI** (optional, free): transcribes recordings with whisper.cpp and uses
+  a local LLM to *suggest* lead fields, follow-ups, and tasks — runs entirely on
+  the office Mac, the caller accepts suggestions with one tap (AI never overwrites
+  data on its own)
+- **Tasks** module: standalone to-dos (with or without a lead), in the Today queue
+- All recordings/transcripts stay on the office computer; nothing touches the cloud
+
 **Built-in safety:**
 - Automatic **daily backups** of the whole database (kept 30 days) — menu → Server → Open Backups Folder; "last backup" indicator + back-up-now button in Settings
 - Roles enforced at the API: callers see only their own leads; admin sees everything
+- Recordings kept 90 days (configurable) then auto-purged; transcripts kept forever
 
 ## Tracking definitions (so reports are never argued with)
 
