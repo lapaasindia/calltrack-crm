@@ -56,6 +56,23 @@ export function createApp() {
 
   const app = express();
   app.disable('x-powered-by');
+
+  // CORS for the mobile app: its WebView origin (http(s)://localhost) is
+  // cross-origin to the LAN server. Bearer-token requests carry no cookies,
+  // so reflecting the origin WITHOUT allow-credentials is safe — it can't be
+  // abused to ride a browser session (those stay same-origin).
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+      res.set('Access-Control-Allow-Origin', origin);
+      res.set('Vary', 'Origin');
+      res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '10mb' })); // big lead imports arrive as JSON
 
   app.use(session({

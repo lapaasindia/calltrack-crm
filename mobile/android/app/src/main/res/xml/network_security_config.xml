@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The office server is plain HTTP on a private WPA2 LAN (no practical way to
+     get a TLS cert for an offline box; the protected WiFi is the security
+     boundary, as documented). Android matches network-security domains by
+     hostname, not CIDR, so a subnet allow-list isn't possible for arbitrary
+     LAN IPs — cleartext is permitted broadly for this internal sideloaded app.
+     The pairing token is revocable, scoping the exposure. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

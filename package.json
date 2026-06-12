@@ -23,6 +23,9 @@
     "dist": "npm run build && electron-builder --mac && node scripts/fetch-win-sqlite.js && electron-builder --win -c.npmRebuild=false && npm rebuild better-sqlite3"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/preferences": "^6.0.4",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.10.0",
     "express": "^4.21.2",
@@ -31,6 +34,7 @@
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.1",
     "electron": "^36.9.5",
     "electron-builder": "^25.1.8"
   },

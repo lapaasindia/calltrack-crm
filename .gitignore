@@ -9,3 +9,13 @@ backups/
 .DS_Store
 release/
 build/icon.png
+
+# Android / Capacitor build artifacts
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/android/.idea/
+mobile/android/app/release/
+*.keystore
+*.apk

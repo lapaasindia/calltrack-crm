@@ -1,0 +1,16 @@
+{
+  "appId": "com.calltrack.mobile",
+  "appName": "CallTrack",
+  "webDir": "mobile/www",
+  "android": {
+    "path": "mobile/android",
+    "allowMixedContent": true
+  },
+  "server": {
+    "cleartext": true,
+    "androidScheme": "http"
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false }
+  }
+}
