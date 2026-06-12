@@ -154,6 +154,34 @@ scripts/   installers, build helpers, screenshot generator
 
 Key conventions: money in integer **paise**; instants stored UTC, business dates as IST calendar dates; one shared phone normalizer everywhere; append-only call/payment records; stage changes recorded as events for honest funnel reporting.
 
+## For students & learners — how auth and credentials work
+
+If you're reading this repo to learn, here's the map of the login/security code and
+the default credentials (these are demo defaults, safe to share — see the warning below):
+
+- **Default accounts** — created in code, not stored as plaintext anywhere:
+  - `server/bootstrap.js` — every fresh install creates **`admin` / `admin123`**.
+  - `server/seed.js` — demo data adds **`priya` / `caller123`** and **`rahul` / `caller123`**.
+  - Passwords are hashed with **bcrypt** (`bcryptjs`) before being stored; the database
+    only ever holds the hash, never the plaintext.
+- **How login works** — `server/routes/auth.js` (`/login` verifies the bcrypt hash and
+  regenerates the session to prevent fixation) → `server/middleware/auth.js`
+  (`requireAuth` loads the user from the session cookie, or from a paired phone's
+  **bearer token**) → role checks via `requireAdmin` and `canAccessLead`.
+- **Device pairing (mobile)** — `server/routes/devices.js` issues one-time codes;
+  `server/routes/auth.js` `/pair` exchanges a code for a long-lived token whose **SHA-256
+  hash** (not the token) is stored in `device_tokens`.
+
+> 🔑 **A real lesson in secret management:** you'll notice this public repo contains the
+> *demo* passwords but **not** the production admin password or the APK signing-keystore
+> password. That's deliberate and is the correct practice: secrets that protect real data
+> or sign code you ship to phones must **never** be committed to version control — once
+> pushed, they live forever in git history, forks, and scrapers. Keep them in a local
+> untracked file, a password manager, or environment variables instead. The keystore for
+> this project, for example, lives outside the repo and is configured via the
+> `CALLTRACK_KEYSTORE` / `CALLTRACK_KEYSTORE_PASS` environment variables (see
+> [docs/MOBILE.md](docs/MOBILE.md)).
+
 ## Security model (read this)
 
 Designed for a **trusted office LAN**: traffic is plain HTTP on your WiFi (TLS certificates aren't practical for offline LAN apps). Keep your WiFi WPA2-protected, don't reuse personal passwords, and you're fine for this threat model. Sessions are server-side, passwords bcrypt-hashed, role checks at the API layer.
