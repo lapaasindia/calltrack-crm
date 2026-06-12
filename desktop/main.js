@@ -107,13 +107,25 @@ function openSetup(error = '') {
 }
 
 async function startHost(cfg) {
+  const wantPort = cfg.port || 3000;
+
+  // If a CallTrack server is already running on the wanted port (e.g. the
+  // LaunchAgent service on this Mac), attach to it instead of starting our own.
+  // Doing this BEFORE importing the server module means we never load the
+  // native better-sqlite3 binary inside Electron — which avoids an ABI mismatch
+  // with the Node build and prevents a second database from opening.
+  if (await isCallTrack(`http://127.0.0.1:${wantPort}`)) {
+    serverInfo = { port: wantPort, urls: null, attached: true };
+    createMainWindow(`http://127.0.0.1:${serverInfo.port}`);
+    return;
+  }
+
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
   process.env.CRM_DATA_DIR = DATA_DIR;
   process.env.CRM_BACKUP_DIR = BACKUP_DIR;
 
   const { startServer } = await import('../server/app.js');
-  const wantPort = cfg.port || 3000;
   const candidates = [wantPort, 3001, 3002, 3003, 8080, 8081];
   let lastErr = null;
   for (const port of candidates) {

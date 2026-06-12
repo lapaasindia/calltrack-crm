@@ -1,6 +1,6 @@
 {
   "name": "calltrack-crm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CallTrack CRM — calling team CRM with full tracking (local-only)",
   "private": true,
   "type": "module",

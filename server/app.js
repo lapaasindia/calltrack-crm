@@ -29,7 +29,7 @@ import reportRoutes from './routes/reports.js';
 import settingsRoutes from './routes/settings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.0.1';
 
 export function lanAddresses() {
   const addrs = [];
