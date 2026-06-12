@@ -5,6 +5,8 @@ calls attach to the right lead by phone number, recordings get uploaded and
 (optionally) transcribed by AI, and new numbers become leads with one tap.
 **Everything stays on your office computer — nothing goes to the internet.**
 
+<p align="center"><img src="screenshots/mobile-app.png" width="280" alt="CallTrack mobile pairing screen"></p>
+
 > **Android only.** iPhones cannot record calls (Apple blocks it system-wide).
 > iPhone users can still use the web app in their browser — they just won't get
 > automatic recording.
