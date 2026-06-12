@@ -12,7 +12,9 @@ const nodeBin = process.execPath;
 const label = 'com.calltrack.crm';
 const agentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
 const plistPath = path.join(agentsDir, `${label}.plist`);
-const logDir = path.join(root, 'data');
+// Logs must live OUTSIDE Desktop/Documents: macOS privacy protection stops
+// launchd from opening files there (service fails to spawn with EX_CONFIG).
+const logDir = path.join(os.homedir(), 'Library', 'Logs', 'CallTrack');
 
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
