@@ -31,6 +31,8 @@ import syncRoutes from './routes/sync.js';
 import reviewRoutes from './routes/review.js';
 import taskRoutes from './routes/tasks.js';
 import deviceRoutes from './routes/devices.js';
+import aiRoutes from './routes/ai.js';
+import { startAiWorker } from './lib/ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const APP_VERSION = '1.0.1';
@@ -138,6 +140,7 @@ export function createApp() {
   app.use('/api/review', reviewRoutes);
   app.use('/api/tasks', taskRoutes);
   app.use('/api/devices', deviceRoutes);
+  app.use('/api/ai', aiRoutes);
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
 
@@ -169,6 +172,7 @@ export function startServer({ port = 3000 } = {}) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, '0.0.0.0', () => {
       startBackupScheduler();
+      startAiWorker();
       const hostname = os.hostname().replace(/\.local$/, '');
       resolve({
         server,

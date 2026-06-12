@@ -210,6 +210,7 @@ export default function Settings() {
   const [products, setProducts] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [devices, setDevices] = useState([]);
+  const [ai, setAi] = useState(null);
   const [settings, setSettings] = useState(null);
   const [companyName, setCompanyName] = useState('');
   const [modal, setModal] = useState(null);
@@ -219,9 +220,15 @@ export default function Settings() {
     api.get('/api/products?all=1').then(setProducts).catch(() => {});
     api.get('/api/templates?all=1').then(setTemplates).catch(() => {});
     api.get('/api/devices').then(setDevices).catch(() => {});
+    api.get('/api/ai/status').then(setAi).catch(() => {});
     api.get('/api/settings').then((s) => { setSettings(s); setCompanyName(s.company_name); }).catch(() => {});
   };
   useEffect(load, []);
+
+  const toggleAi = async (enabled) => {
+    try { await api.put('/api/ai/settings', { enabled }); showToast(enabled ? 'AI transcription on' : 'AI off'); load(); }
+    catch (err) { showToast(err.message, 'error'); }
+  };
 
   const revokeDevice = async (d) => {
     if (!window.confirm(`Disconnect ${d.device_name} (${d.user_name})? The phone stops syncing immediately.`)) return;
@@ -376,6 +383,29 @@ export default function Settings() {
             <button className="btn small" onClick={saveCompany}>Save</button>
           </div>
         </div>
+      </div>
+
+      <div className="card">
+        <h2>🤖 AI call transcription</h2>
+        {ai && (
+          <>
+            <p style={{ color: 'var(--ink-soft)', marginTop: 0 }}>
+              Transcribes call recordings and suggests lead updates, follow-ups and tasks —
+              runs entirely on this computer, nothing sent to the internet.
+              {!ai.model_present && <b style={{ color: 'var(--red)' }}> Model not installed on this computer.</b>}
+            </p>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button className={`btn ${ai.enabled ? 'secondary' : 'green'}`} disabled={!ai.model_present}
+                onClick={() => toggleAi(!ai.enabled)}>
+                {ai.enabled ? 'Turn off' : 'Turn on'}
+              </button>
+              <span className="meta" style={{ color: 'var(--ink-soft)', fontSize: 13 }}>
+                Status: <b>{ai.enabled ? 'ON' : 'off'}</b>
+                {ai.enabled && ` · ${ai.queue.pending} waiting, ${ai.queue.processing} processing · ${ai.whisper_model}`}
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="card">

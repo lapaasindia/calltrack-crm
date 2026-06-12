@@ -255,10 +255,19 @@ export default function LeadDetail() {
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // 'call' | 'win' | 'followup' | {payment: deal}
   const [users, setUsers] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
 
   const load = useCallback(() => {
     api.get(`/api/leads/${id}`).then(setLead).catch((e) => setError(e.message));
+    api.get(`/api/ai/suggestions?lead_id=${id}`).then(setSuggestions).catch(() => {});
   }, [id]);
+
+  const actSuggestion = async (s, action) => {
+    try {
+      await api.post(`/api/ai/suggestions/${s.id}/${action}`);
+      load();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (user.role === 'admin') {
@@ -369,6 +378,26 @@ export default function LeadDetail() {
           <button className="btn secondary" onClick={() => setStage('interested')}>Reopen lead</button>
         )}
       </div>
+
+      {suggestions.length > 0 && (
+        <div className="card" style={{ borderLeft: '4px solid var(--brand)' }}>
+          <h2>🤖 AI suggestions from call recordings</h2>
+          <div className="row-list">
+            {suggestions.map((s) => (
+              <div key={s.id} className="lead-row" style={{ padding: '10px 12px' }}>
+                <div className="info">
+                  <div className="name" style={{ fontSize: 14 }}>{s.label}</div>
+                  {s.summary && <div className="meta">{s.summary}</div>}
+                </div>
+                <div className="actions">
+                  <button className="btn small green" onClick={() => actSuggestion(s, 'accept')}>Accept</button>
+                  <button className="btn small secondary" onClick={() => actSuggestion(s, 'dismiss')}>✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {lead.deals.map((deal) => (
         <div className="card" key={deal.id}>
