@@ -1,7 +1,57 @@
 import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import { api, rupees, fmtDateTime } from '../api.js';
 import { useApp } from '../App.jsx';
 import { Modal, invalidateTemplateCache } from '../components.jsx';
+
+function PairDeviceModal({ users, onClose }) {
+  const { showToast } = useApp();
+  const [userId, setUserId] = useState('');
+  const [pairing, setPairing] = useState(null); // {code, qr}
+
+  const generate = async () => {
+    try {
+      const res = await api.post('/api/devices/pairing-code', { user_id: Number(userId) });
+      const payload = JSON.stringify({ u: window.location.origin, c: res.code });
+      const qr = await QRCode.toDataURL(payload, { width: 260, margin: 1 });
+      setPairing({ code: res.code, qr });
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  return (
+    <Modal title="Pair a phone" onClose={onClose}>
+      {!pairing ? (
+        <>
+          <div className="field">
+            <label>Whose phone is this?</label>
+            <select value={userId} onChange={(e) => setUserId(e.target.value)}>
+              <option value="">Pick team member…</option>
+              {users.filter((u) => u.is_active).map((u) => (
+                <option key={u.id} value={u.id}>{u.full_name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="modal-actions">
+            <button className="btn secondary" onClick={onClose}>Cancel</button>
+            <button className="btn" disabled={!userId} onClick={generate}>Generate code</button>
+          </div>
+        </>
+      ) : (
+        <div style={{ textAlign: 'center' }}>
+          <img src={pairing.qr} alt="Pairing QR" style={{ borderRadius: 12 }} />
+          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '0.15em', margin: '10px 0 4px' }}>
+            {pairing.code}
+          </div>
+          <p style={{ color: 'var(--ink-soft)', fontSize: 13.5 }}>
+            In the CallTrack mobile app: <b>Scan this QR</b> (or type the code with the server
+            address <b>{window.location.origin}</b>). Valid for 15 minutes, works once.
+          </p>
+          <button className="btn block" onClick={onClose}>Done</button>
+        </div>
+      )}
+    </Modal>
+  );
+}
 
 function UserModal({ user: editing, onClose, onSaved }) {
   const { showToast } = useApp();
@@ -159,6 +209,7 @@ export default function Settings() {
   const [users, setUsers] = useState([]);
   const [products, setProducts] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [devices, setDevices] = useState([]);
   const [settings, setSettings] = useState(null);
   const [companyName, setCompanyName] = useState('');
   const [modal, setModal] = useState(null);
@@ -167,9 +218,16 @@ export default function Settings() {
     api.get('/api/users').then(setUsers).catch(() => {});
     api.get('/api/products?all=1').then(setProducts).catch(() => {});
     api.get('/api/templates?all=1').then(setTemplates).catch(() => {});
+    api.get('/api/devices').then(setDevices).catch(() => {});
     api.get('/api/settings').then((s) => { setSettings(s); setCompanyName(s.company_name); }).catch(() => {});
   };
   useEffect(load, []);
+
+  const revokeDevice = async (d) => {
+    if (!window.confirm(`Disconnect ${d.device_name} (${d.user_name})? The phone stops syncing immediately.`)) return;
+    try { await api.post(`/api/devices/${d.id}/revoke`); load(); }
+    catch (err) { showToast(err.message, 'error'); }
+  };
 
   const toggleUser = async (u) => {
     try {
@@ -279,6 +337,37 @@ export default function Settings() {
       </div>
 
       <div className="card">
+        <h2>📱 Paired phones (call sync) {' '}
+          <button className="btn small" style={{ float: 'right' }}
+            onClick={() => setModal({ pair: true })}>+ Pair phone</button></h2>
+        {devices.length === 0 && (
+          <p style={{ color: 'var(--ink-soft)', marginTop: 0 }}>
+            No phones paired yet. Install the CallTrack mobile app on a caller's Android phone
+            and pair it here — their calls and recordings will sync automatically.
+          </p>
+        )}
+        {devices.length > 0 && (
+          <div className="table-wrap">
+            <table className="data">
+              <thead><tr><th>Phone</th><th>Team member</th><th>Last sync</th><th></th></tr></thead>
+              <tbody>
+                {devices.map((d) => (
+                  <tr key={d.id} style={{ opacity: d.revoked_at ? 0.45 : 1 }}>
+                    <td><b>{d.device_name}</b>{d.revoked_at && ' (disconnected)'}</td>
+                    <td>{d.user_name}</td>
+                    <td>{d.last_seen_at ? fmtDateTime(d.last_seen_at) : 'never'}</td>
+                    <td>{!d.revoked_at && (
+                      <button className="btn small secondary" onClick={() => revokeDevice(d)}>Disconnect</button>
+                    )}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
         <h2>🏢 Business</h2>
         <div className="field" style={{ maxWidth: 360 }}>
           <label>Company name (used in WhatsApp messages)</label>
@@ -307,6 +396,8 @@ export default function Settings() {
         <ProductModal product={modal.product} onClose={() => setModal(null)} onSaved={load} />)}
       {modal && 'template' in modal && (
         <TemplateModal template={modal.template} onClose={() => setModal(null)} onSaved={load} />)}
+      {modal && 'pair' in modal && (
+        <PairDeviceModal users={users} onClose={() => { setModal(null); load(); }} />)}
     </>
   );
 }

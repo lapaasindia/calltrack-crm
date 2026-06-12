@@ -134,6 +134,46 @@ export function LogCallModal({ lead, defaultType = 'sales', onClose, onSaved }) 
   );
 }
 
+export function TaskModal({ lead, onClose, onSaved }) {
+  const { showToast } = useApp();
+  const [title, setTitle] = useState('');
+  const [details, setDetails] = useState('');
+  const [dueDate, setDueDate] = useState(() =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()));
+  const save = async () => {
+    try {
+      await api.post('/api/tasks', {
+        title, details, due_date: dueDate, lead_id: lead?.id || undefined,
+      });
+      showToast('Task added ✓');
+      onSaved?.(); onClose();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+  return (
+    <Modal title={lead ? `Task for ${lead.name}` : 'New task'} onClose={onClose}>
+      <div className="field">
+        <label>What needs doing?</label>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
+          placeholder="e.g. Send course brochure on WhatsApp" />
+      </div>
+      <div className="form-grid">
+        <div className="field">
+          <label>Due date</label>
+          <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Details (optional)</label>
+          <input value={details} onChange={(e) => setDetails(e.target.value)} />
+        </div>
+      </div>
+      <div className="modal-actions">
+        <button className="btn secondary" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={!title.trim()} onClick={save}>Add task</button>
+      </div>
+    </Modal>
+  );
+}
+
 // Templates + company name are fetched once and cached for the session.
 let templateCache = null;
 async function loadTemplateCtx() {

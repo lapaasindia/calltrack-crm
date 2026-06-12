@@ -27,6 +27,10 @@ import dealRoutes from './routes/deals.js';
 import importRoutes from './routes/imports.js';
 import reportRoutes from './routes/reports.js';
 import settingsRoutes from './routes/settings.js';
+import syncRoutes from './routes/sync.js';
+import reviewRoutes from './routes/review.js';
+import taskRoutes from './routes/tasks.js';
+import deviceRoutes from './routes/devices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const APP_VERSION = '1.0.1';
@@ -72,7 +76,31 @@ export function createApp() {
   }));
 
   // Public: lets the desktop app (and curl) identify a CallTrack server.
-  app.get('/api/health', (req, res) => res.json({ app: 'calltrack-crm', version: APP_VERSION }));
+  app.get('/api/health', (req, res) => {
+    let diskFreeGb = null;
+    try {
+      const s = fs.statfsSync(DATA_DIR);
+      diskFreeGb = Math.round((s.bavail * s.bsize) / 1073741824);
+    } catch { /* best effort */ }
+    res.json({ app: 'calltrack-crm', version: APP_VERSION, disk_free_gb: diskFreeGb });
+  });
+
+  // Public: the mobile app checks this (possibly unpaired/revoked) to find
+  // updates. The APK itself is served from data/apk/.
+  const apkDir = path.join(DATA_DIR, 'apk');
+  app.get('/api/app-version', (req, res) => {
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(apkDir, 'version.json'), 'utf8'));
+      res.json(meta);
+    } catch {
+      res.json({ versionCode: 0 });
+    }
+  });
+  app.get('/download/calltrack.apk', (req, res) => {
+    const apk = path.join(apkDir, 'calltrack.apk');
+    if (!fs.existsSync(apk)) return res.status(404).send('No APK published yet');
+    res.download(apk, 'calltrack.apk');
+  });
 
   // Public auth endpoints; everything else requires a session.
   app.use('/api/auth', authRoutes);
@@ -89,6 +117,10 @@ export function createApp() {
   app.use('/api/imports', importRoutes);
   app.use('/api/reports', reportRoutes);
   app.use('/api/settings', settingsRoutes);
+  app.use('/api/sync', syncRoutes);
+  app.use('/api/review', reviewRoutes);
+  app.use('/api/tasks', taskRoutes);
+  app.use('/api/devices', deviceRoutes);
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
 

@@ -53,7 +53,9 @@ router.get('/leaderboard', (req, res) => {
      LEFT JOIN (
        SELECT user_id, COUNT(*) AS dials, SUM(disposition = 'connected') AS connects,
               COUNT(DISTINCT lead_id) AS unique_leads
-       FROM calls WHERE called_at >= ? AND called_at < ? GROUP BY user_id
+       FROM calls WHERE called_at >= ? AND called_at < ?
+         AND (auto_logged = 0 OR disposition = 'connected')
+       GROUP BY user_id
      ) c ON c.user_id = u.id
      LEFT JOIN (
        SELECT created_by, COUNT(*) AS deals, SUM(deal_value_paise) AS deal_value_paise
@@ -98,6 +100,7 @@ router.get('/agent-daily', (req, res) => {
        ROUND(100.0 * SUM(c.disposition = 'connected') / COUNT(*)) AS connect_rate_pct
      FROM calls c JOIN users u ON u.id = c.user_id
      WHERE c.called_at >= ? AND c.called_at < ?
+       AND (c.auto_logged = 0 OR c.disposition = 'connected')
      GROUP BY day, u.id ORDER BY day DESC, dials DESC`
   ).all(startUtc, endUtc);
 
@@ -196,7 +199,9 @@ router.get('/daily-trend', (req, res) => {
   const calls = db.prepare(
     `SELECT ${SQL_IST_DATE('called_at')} AS day, COUNT(*) AS dials,
             SUM(disposition = 'connected') AS connects
-     FROM calls WHERE called_at >= ? AND called_at < ? GROUP BY day ORDER BY day`
+     FROM calls WHERE called_at >= ? AND called_at < ?
+       AND (auto_logged = 0 OR disposition = 'connected')
+     GROUP BY day ORDER BY day`
   ).all(startUtc, endUtc);
   const deals = db.prepare(
     `SELECT won_date AS day, COUNT(*) AS deals FROM deals
@@ -224,7 +229,8 @@ router.get('/summary', (req, res) => {
 
   const callsToday = db.prepare(
     `SELECT COUNT(*) AS dials, COALESCE(SUM(disposition='connected'),0) AS connects
-     FROM calls WHERE called_at >= ? AND called_at < ?`
+     FROM calls WHERE called_at >= ? AND called_at < ?
+       AND (auto_logged = 0 OR disposition = 'connected')`
   ).get(startUtc, endUtc);
   const dealsToday = db.prepare(
     "SELECT COUNT(*) AS n, COALESCE(SUM(deal_value_paise),0) AS value FROM deals WHERE won_date = ? AND status != 'cancelled'"

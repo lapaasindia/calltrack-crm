@@ -136,7 +136,10 @@ router.get('/:id', loadLead, (req, res) => {
     ? db.prepare('SELECT full_name FROM users WHERE id = ?').get(lead.assigned_to)?.full_name
     : null;
   const calls = db.prepare(
-    `SELECT c.*, u.full_name AS user_name FROM calls c
+    `SELECT c.*, u.full_name AS user_name,
+       (SELECT r.id FROM recordings r WHERE r.call_id = c.id LIMIT 1) AS recording_id,
+       (SELECT r.summary FROM recordings r WHERE r.call_id = c.id LIMIT 1) AS recording_summary
+     FROM calls c
      JOIN users u ON u.id = c.user_id WHERE c.lead_id = ? ORDER BY c.called_at DESC`
   ).all(lead.id);
   const events = db.prepare(

@@ -5,9 +5,9 @@ import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 
 const DISPOSITIONS = ['connected', 'not_picked', 'busy', 'switched_off', 'wrong_number'];
-const CALL_TYPES = ['sales', 'follow_up', 'collection', 'support'];
+export const CALL_TYPES = ['sales', 'follow_up', 'collection', 'support'];
 // Outcomes only apply to connected calls, validated per call type.
-const OUTCOMES = {
+export const OUTCOMES = {
   sales: ['interested', 'not_interested', 'callback_requested', 'wrong_person'],
   follow_up: ['interested', 'not_interested', 'callback_requested', 'wrong_person'],
   collection: ['payment_promised', 'payment_collected', 'dispute', 'callback_requested'],

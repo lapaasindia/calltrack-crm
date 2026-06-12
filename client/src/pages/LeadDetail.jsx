@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso } from '../api.js';
 import { useApp } from '../App.jsx';
-import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton } from '../components.jsx';
+import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal } from '../components.jsx';
 
 const DISPOSITION_LABELS = {
   connected: '✅ Connected', not_picked: '📵 Not picked', busy: '⏳ Busy',
@@ -361,6 +361,7 @@ export default function LeadDetail() {
         {!lead.follow_up && (
           <button className="btn secondary" onClick={() => setModal('followup')}>⏰ Schedule follow-up</button>
         )}
+        <button className="btn secondary" onClick={() => setModal('task')}>✅ Add task</button>
         {lead.stage !== 'lost' && lead.stage !== 'won' && (
           <button className="btn secondary" onClick={() => setStage('lost')}>Mark lost</button>
         )}
@@ -439,8 +440,16 @@ export default function LeadDetail() {
                   {DISPOSITION_LABELS[t.c.disposition]} · {TYPE_LABELS[t.c.call_type]}
                   {t.c.outcome && <> → <b>{OUTCOME_LABELS[t.c.outcome] || t.c.outcome}</b></>}
                 </div>
-                <div className="tl-meta">{fmtDateTime(t.c.called_at)} · {t.c.user_name}</div>
+                <div className="tl-meta">
+                  {fmtDateTime(t.c.called_at)} · {t.c.user_name}
+                  {t.c.auto_logged ? ' · auto-logged' : ''}
+                </div>
                 {t.c.notes && <div className="tl-notes">{t.c.notes}</div>}
+                {t.c.recording_summary && <div className="tl-notes">🤖 {t.c.recording_summary}</div>}
+                {t.c.recording_id && (
+                  <audio controls preload="none" style={{ height: 34, marginTop: 6, maxWidth: '100%' }}
+                    src={`/api/review/audio/${t.c.recording_id}`} />
+                )}
               </div>
             </div>
           ) : (
@@ -464,6 +473,7 @@ export default function LeadDetail() {
       )}
       {modal === 'win' && <WinDealModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
       {modal === 'followup' && <FollowUpModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
+      {modal === 'task' && <TaskModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
       {modal?.payment && (
         <PaymentModal deal={modal.payment} onClose={() => setModal(null)} onSaved={load} />
       )}

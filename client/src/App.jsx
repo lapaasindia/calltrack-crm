@@ -9,6 +9,7 @@ import ImportPage from './pages/ImportPage.jsx';
 import Collections from './pages/Collections.jsx';
 import Reports from './pages/Reports.jsx';
 import Settings from './pages/Settings.jsx';
+import Review from './pages/Review.jsx';
 
 const AppCtx = createContext(null);
 export const useApp = () => useContext(AppCtx);
@@ -18,12 +19,13 @@ function Toast({ toast }) {
   return <div className={`toast ${toast.kind || ''}`}>{toast.msg}</div>;
 }
 
-function Nav({ user, dueCount, onLogout }) {
+function Nav({ user, dueCount, reviewCount, onLogout }) {
   const isAdmin = user.role === 'admin';
   const items = [
     { to: '/', label: 'Today', icon: '☀️', badge: dueCount },
     { to: '/leads', label: 'Leads', icon: '👥' },
     { to: '/collections', label: 'Payments', icon: '₹' },
+    { to: '/review', label: 'Review', icon: '🔍', badge: reviewCount },
     ...(isAdmin ? [
       { to: '/import', label: 'Import', icon: '⬆️' },
       { to: '/reports', label: 'Reports', icon: '📊' },
@@ -68,6 +70,7 @@ export default function App() {
   const [user, setUser] = useState(undefined); // undefined = checking
   const [toast, setToast] = useState(null);
   const [dueCount, setDueCount] = useState(0);
+  const [reviewCount, setReviewCount] = useState(0);
   const location = useLocation();
 
   const showToast = useCallback((msg, kind) => {
@@ -87,10 +90,14 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     let alive = true;
-    const refresh = () =>
+    const refresh = () => {
       api.get('/api/today')
-        .then((d) => alive && setDueCount(d.followups.length + d.payments_due.length))
+        .then((d) => alive && setDueCount(d.followups.length + d.payments_due.length + (d.tasks?.length || 0)))
         .catch(() => {});
+      api.get('/api/review/summary')
+        .then((s) => alive && setReviewCount(s.total))
+        .catch(() => {});
+    };
     refresh();
     const iv = setInterval(refresh, 60000);
     const onVis = () => document.visibilityState === 'visible' && refresh();
@@ -106,13 +113,14 @@ export default function App() {
   return (
     <AppCtx.Provider value={{ user, showToast }}>
       <div className="app">
-        <Nav user={user} dueCount={dueCount} onLogout={logout} />
+        <Nav user={user} dueCount={dueCount} reviewCount={reviewCount} onLogout={logout} />
         <main className="main">
           <Routes>
             <Route path="/" element={<Today />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/leads/:id" element={<LeadDetail />} />
             <Route path="/collections" element={<Collections />} />
+            <Route path="/review" element={<Review />} />
             {user.role === 'admin' && (
               <>
                 <Route path="/import" element={<ImportPage />} />

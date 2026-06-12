@@ -27,6 +27,7 @@
     "better-sqlite3": "^11.10.0",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
+    "multer": "^2.1.1",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
@@ -57,7 +58,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ]
     },
@@ -66,7 +70,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

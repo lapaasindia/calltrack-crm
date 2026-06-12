@@ -47,13 +47,31 @@ router.get('/', (req, res) => {
      ORDER BY i.due_date`
   ).all(...instParams);
 
+  // Tasks due today or overdue.
+  const taskParams = [today];
+  let taskUserClause = '';
+  if (userFilter) { taskUserClause = 'AND t.assigned_to = ?'; taskParams.push(userFilter); }
+  const tasks = db.prepare(
+    `SELECT t.id, t.title, t.details, t.due_date, t.source,
+            l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone,
+            u.full_name AS assigned_to_name
+     FROM tasks t
+     JOIN users u ON u.id = t.assigned_to
+     LEFT JOIN leads l ON l.id = t.lead_id AND l.deleted_at IS NULL
+     WHERE t.status = 'pending' AND t.due_date <= ? ${taskUserClause}
+     ORDER BY t.due_date`
+  ).all(...taskParams);
+
   // My stats today vs targets (for callers and for admin's own view).
+  // Auto-logged mobile calls only count as dials when they connected —
+  // otherwise unanswered personal redials would inflate targets.
   const statsUser = userFilter || req.user.id;
   const stats = db.prepare(
     `SELECT COUNT(*) AS calls,
             SUM(disposition = 'connected') AS connects,
             COUNT(DISTINCT lead_id) AS unique_leads
-     FROM calls WHERE user_id = ? AND called_at >= ? AND called_at < ?`
+     FROM calls WHERE user_id = ? AND called_at >= ? AND called_at < ?
+       AND (auto_logged = 0 OR disposition = 'connected')`
   ).get(statsUser, startUtc, endUtc);
   const dealsToday = db.prepare(
     'SELECT COUNT(*) AS n FROM deals WHERE created_by = ? AND won_date = ?'
@@ -67,6 +85,7 @@ router.get('/', (req, res) => {
     date: today,
     followups,
     payments_due: paymentsDue,
+    tasks,
     stats: {
       calls: stats.calls || 0,
       connects: stats.connects || 0,

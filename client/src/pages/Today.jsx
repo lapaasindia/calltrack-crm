@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, rupees, fmtDateTime, fmtDate, telLink, isOverdue, todayIstDate } from '../api.js';
 import { useApp } from '../App.jsx';
-import { LogCallModal, WhatsAppButton, StageBadge } from '../components.jsx';
+import { LogCallModal, WhatsAppButton, StageBadge, TaskModal } from '../components.jsx';
 
 function TargetBar({ label, done, target }) {
   const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
@@ -23,6 +23,14 @@ export default function Today() {
   const [viewUser, setViewUser] = useState('me');
   const [users, setUsers] = useState([]);
   const [logging, setLogging] = useState(null); // {lead, type}
+  const [addingTask, setAddingTask] = useState(false);
+
+  const completeTask = async (task) => {
+    try {
+      await api.patch(`/api/tasks/${task.id}`, { status: 'done' });
+      load();
+    } catch { /* toast handled globally */ }
+  };
 
   const load = useCallback(() => {
     const q = user.role === 'admin' && viewUser !== 'me' ? `?user_id=${viewUser}` : '';
@@ -151,9 +159,44 @@ export default function Today() {
         })}
       </div>
 
+      <div className="section-label">
+        ✅ Tasks {data.tasks?.length > 0 && `(${data.tasks.length})`}
+        <button className="btn small secondary" style={{ marginLeft: 10 }}
+          onClick={() => setAddingTask(true)}>+ Add</button>
+      </div>
+      <div className="row-list">
+        {(!data.tasks || data.tasks.length === 0) && (
+          <div className="card empty">No tasks due. Add one with the + button.</div>
+        )}
+        {data.tasks?.map((t) => (
+          <div key={t.id} className="lead-row">
+            <input type="checkbox" style={{ width: 19, height: 19 }} title="Mark done"
+              onChange={() => completeTask(t)} />
+            <div className="info">
+              <div className="name">
+                {t.title}
+                {t.due_date < data.date && <span className="badge overdue" style={{ marginLeft: 6 }}>overdue</span>}
+                {t.source === 'ai' && <span className="badge new" style={{ marginLeft: 6 }}>AI</span>}
+              </div>
+              <div className="meta">
+                {t.lead_id && <Link to={`/leads/${t.lead_id}`} onClick={(e) => e.stopPropagation()}><b>{t.lead_name}</b></Link>}
+                {t.details ? ` · ${t.details}` : ''}{viewUser === 'all' ? ` · ${t.assigned_to_name}` : ''}
+              </div>
+            </div>
+            {t.lead_phone && (
+              <div className="actions">
+                <a className="act-btn call" href={telLink(t.lead_phone)} title="Call">📞</a>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
       <div style={{ marginTop: 18 }}>
         <Link to="/leads?stage=new" className="btn secondary">→ Call fresh leads</Link>
       </div>
+
+      {addingTask && <TaskModal onClose={() => setAddingTask(false)} onSaved={load} />}
 
       {logging && (
         <LogCallModal lead={logging.lead} defaultType={logging.type}
