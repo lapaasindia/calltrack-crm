@@ -1,9 +1,10 @@
 {
   "name": "calltrack-crm",
   "version": "1.0.0",
-  "description": "CallTrack CRM — calling team CRM with full tracking (LAN-deployed)",
+  "description": "CallTrack CRM — calling team CRM with full tracking (local-only)",
   "private": true,
   "type": "module",
+  "main": "desktop/main.js",
   "engines": {
     "node": "22.x"
   },
@@ -13,7 +14,13 @@
     "test": "node --test server/test/*.test.js",
     "build": "npm --prefix client run build",
     "setup": "npm install && npm --prefix client install && npm --prefix client run build && node server/seed.js",
-    "install-autostart": "node scripts/install-autostart.js"
+    "install-autostart": "node scripts/install-autostart.js",
+    "app": "electron .",
+    "app:rebuild": "electron-rebuild -f -w better-sqlite3 && codesign --force --sign - node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "icons": "electron desktop/make-icon.js",
+    "dist:mac": "npm run build && electron-builder --mac && npm rebuild better-sqlite3",
+    "dist:win": "npm run build && node scripts/fetch-win-sqlite.js && electron-builder --win -c.npmRebuild=false && npm rebuild better-sqlite3",
+    "dist": "npm run build && electron-builder --mac && node scripts/fetch-win-sqlite.js && electron-builder --win -c.npmRebuild=false && npm rebuild better-sqlite3"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -21,5 +28,49 @@
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "electron": "^36.9.5",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.calltrack.crm",
+    "productName": "CallTrack CRM",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "desktop/**/*",
+      "!desktop/make-icon.js",
+      "server/**/*",
+      "!server/test/**",
+      "client/dist/**/*",
+      "scripts/**/*"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

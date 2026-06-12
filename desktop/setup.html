@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CallTrack Setup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1f36; color: #e7e9f4; padding: 28px; -webkit-user-select: none;
+  }
+  .logo { font-size: 24px; font-weight: 800; color: #fff; }
+  .logo span { color: #818cf8; }
+  .tag { color: #8f95ab; font-size: 13.5px; margin: 4px 0 22px; }
+  .err {
+    background: rgba(224, 36, 36, 0.15); border: 1px solid rgba(224, 36, 36, 0.4);
+    color: #ffb4b4; border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-bottom: 16px;
+    display: none;
+  }
+  .choice {
+    display: block; width: 100%; text-align: left; background: rgba(255,255,255,0.05);
+    border: 1.5px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 18px;
+    color: #e7e9f4; cursor: pointer; margin-bottom: 14px; font-family: inherit;
+  }
+  .choice:hover, .choice.on { border-color: #818cf8; background: rgba(129,140,248,0.1); }
+  .choice .t { font-size: 16px; font-weight: 700; color: #fff; }
+  .choice .d { font-size: 13px; color: #a7adc4; margin-top: 4px; line-height: 1.5; }
+  .panel { display: none; padding: 4px 4px 0; }
+  label { display: block; font-size: 13px; font-weight: 600; color: #a7adc4; margin: 12px 0 6px; }
+  input[type="text"] {
+    width: 100%; padding: 11px 13px; border-radius: 10px; border: 1.5px solid rgba(255,255,255,0.15);
+    background: rgba(0,0,0,0.25); color: #fff; font-size: 14px; outline: none;
+  }
+  input[type="text"]:focus { border-color: #818cf8; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 13.5px; color: #cfd3e4; }
+  .btn {
+    width: 100%; margin-top: 18px; background: #4f46e5; border: none; color: #fff;
+    font-size: 15px; font-weight: 700; padding: 13px; border-radius: 11px; cursor: pointer; font-family: inherit;
+  }
+  .btn:hover { background: #4338ca; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .ghost {
+    background: none; border: 1px solid rgba(255,255,255,0.2); color: #a7adc4;
+    font-size: 12.5px; padding: 8px 12px; border-radius: 8px; cursor: pointer; margin-top: 14px; font-family: inherit;
+  }
+  .note { font-size: 12px; color: #8f95ab; margin-top: 14px; line-height: 1.55; }
+  .ok { color: #6ee7b7; font-size: 13px; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+  <div class="logo">Call<span>Track</span> CRM</div>
+  <div class="tag">One-time setup — how should this computer be used?</div>
+  <div class="err" id="err"></div>
+
+  <button class="choice" id="pickHost">
+    <div class="t">🖥️ This is the MAIN computer (host)</div>
+    <div class="d">All CRM data lives on this computer. It runs the server for the whole
+    office — keep it on during working hours. Pick this on exactly ONE computer.</div>
+  </button>
+
+  <button class="choice" id="pickJoin">
+    <div class="t">📡 Connect to the main computer</div>
+    <div class="d">For everyone else's computer. Reads and saves everything on the main
+    computer over your office WiFi — nothing is stored here.</div>
+  </button>
+
+  <div class="panel" id="hostPanel">
+    <label class="check"><input type="checkbox" id="openAtLogin" checked />
+      Start CallTrack automatically when this computer turns on</label>
+    <button class="ghost" id="restoreBtn">↩︎ I have a backup file — restore my data</button>
+    <div class="ok" id="restoreOk"></div>
+    <div class="note">First login: <b>admin / admin123</b> — change it in Settings.
+    Daily backups are saved on this computer (menu: Server → Open Backups Folder).
+    Nothing ever goes to the internet.</div>
+    <button class="btn" id="goHost">Start as main computer</button>
+  </div>
+
+  <div class="panel" id="joinPanel">
+    <label>Main computer's address</label>
+    <input type="text" id="serverUrl" placeholder="e.g.  192.168.1.50:3000  or  lapaas-2.local:3000" />
+    <div class="note">Find it on the main computer: open CallTrack there → menu
+    <b>Server → Connection Info</b>. Both computers must be on the same office network.</div>
+    <button class="btn" id="goJoin">Connect</button>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  if (params.get('error')) { $('err').textContent = params.get('error'); $('err').style.display = 'block'; }
+
+  let mode = null;
+  function pick(m) {
+    mode = m;
+    $('pickHost').classList.toggle('on', m === 'host');
+    $('pickJoin').classList.toggle('on', m === 'join');
+    $('hostPanel').style.display = m === 'host' ? 'block' : 'none';
+    $('joinPanel').style.display = m === 'join' ? 'block' : 'none';
+    if (m === 'join') $('serverUrl').focus();
+  }
+  $('pickHost').onclick = () => pick('host');
+  $('pickJoin').onclick = () => pick('join');
+
+  function fail(msg) { $('err').textContent = msg; $('err').style.display = 'block'; }
+
+  $('goHost').onclick = async () => {
+    $('goHost').disabled = true;
+    const res = await window.calltrack.choose({ mode: 'host', openAtLogin: $('openAtLogin').checked });
+    if (!res.ok) { fail(res.error); $('goHost').disabled = false; }
+  };
+
+  $('goJoin').onclick = async () => {
+    if (!$('serverUrl').value.trim()) return fail('Enter the main computer\'s address first.');
+    $('goJoin').disabled = true;
+    $('goJoin').textContent = 'Checking…';
+    const res = await window.calltrack.choose({ mode: 'join', serverUrl: $('serverUrl').value });
+    if (!res.ok) {
+      fail(res.error);
+      $('goJoin').disabled = false;
+      $('goJoin').textContent = 'Connect';
+    }
+  };
+  $('serverUrl') && ($('serverUrl').onkeydown = (e) => { if (e.key === 'Enter') $('goJoin').click(); });
+
+  $('restoreBtn').onclick = async () => {
+    const res = await window.calltrack.restore();
+    if (res.ok) {
+      $('restoreOk').textContent = `✓ Restored from ${res.file} — your data will be there when the app starts.`;
+      $('restoreOk').style.display = 'block';
+    } else if (res.error) fail(res.error);
+  };
+</script>
+</body>
+</html>

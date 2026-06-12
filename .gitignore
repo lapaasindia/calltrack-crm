@@ -7,3 +7,5 @@ backups/
 *.sqlite-wal
 *.sqlite-shm
 .DS_Store
+release/
+build/icon.png

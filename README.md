@@ -22,6 +22,40 @@ no monthly fees, your data never leaves the office.
 
 ---
 
+## Option A (recommended): install the desktop app
+
+CallTrack ships as a normal installable app for **Mac and Windows**. Installers are in the
+`release/` folder (or build them yourself: `npm run dist:mac` / `npm run dist:win`):
+
+| File | For |
+|---|---|
+| `CallTrack CRM-1.0.0-arm64.dmg` | Mac with Apple Silicon (M1/M2/M3/M4) |
+| `CallTrack CRM-1.0.0.dmg` | Older Intel Macs |
+| `CallTrack CRM Setup 1.0.0.exe` | Windows 10/11 (64-bit) |
+
+On first launch the app asks one question:
+
+- **"This is the MAIN computer"** → pick this on exactly ONE computer (the office machine
+  that stays on). All data lives there — in the system's app-data folder, never in any
+  cloud. It serves the office WiFi, so phones and browsers can still connect, and it can
+  start automatically at login. Daily backups: menu → **Server → Open Backups Folder**.
+- **"Connect to the main computer"** → pick this on everyone else's computer and type the
+  main computer's address (find it on the main computer: menu → **Server → Connection Info**).
+
+Moving existing data into the app: on the setup screen choose
+**"I have a backup file — restore my data"** and pick your `crm-YYYY-MM-DD.sqlite` backup
+(or `data/crm.sqlite` from this folder).
+
+Because the app isn't code-signed with a paid developer certificate:
+- **Mac**: if it says "can't be opened", right-click the app → **Open** → Open (needed once).
+- **Windows**: if SmartScreen appears, click **More info → Run anyway** (needed once).
+
+> Closing the window on the main computer does NOT stop the server — it keeps running in
+> the background (tray/dock icon) so the team stays connected. Quit from the menu to
+> actually stop it.
+
+## Option B: run from this folder (no app install)
+
 ## First-time setup (one time, ~5 minutes)
 
 Requires [Node.js 22](https://nodejs.org) (LTS) on the office Mac.
