@@ -14,14 +14,14 @@ Built for small sales/calling teams (2–15 callers + a manager): every call log
 
 ## 📥 Download
 
-**Latest version: v1.1.0** — these links always point to the newest release:
+**Latest version: v1.1.1** — these links always point to the newest release:
 
 | Platform | Download |
 |---|---|
-| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM 1.1.0 — mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.0-mac-arm64.dmg) |
-| **Mac** (Intel) | [CallTrack-CRM 1.1.0 — mac-x64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.0-mac-x64.dmg) |
-| **Windows** 10/11 (64-bit) | [CallTrack-CRM 1.1.0 Setup — win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.1.0-win-x64.exe) |
-| **Android** call-capture app | [CallTrack-CRM 1.1.0 — android.apk](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.0-android.apk) |
+| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM 1.1.1 — mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.1-mac-arm64.dmg) |
+| **Mac** (Intel) | [CallTrack-CRM 1.1.1 — mac-x64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.1-mac-x64.dmg) |
+| **Windows** 10/11 (64-bit) | [CallTrack-CRM 1.1.1 Setup — win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.1.1-win-x64.exe) |
+| **Android** call-capture app | [CallTrack-CRM 1.1.1 — android.apk](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.1.1-android.apk) |
 
 **📱 Android call-capture app** (optional): once the desktop app is running, install
 it on callers' Android phones from `http://<office-server>:3000/download/calltrack.apk`
