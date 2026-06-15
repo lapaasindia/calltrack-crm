@@ -41,6 +41,7 @@
   "build": {
     "appId": "com.calltrack.crm",
     "productName": "CallTrack CRM",
+    "afterPack": "scripts/afterpack-sign.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"

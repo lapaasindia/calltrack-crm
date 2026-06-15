@@ -30,8 +30,12 @@ and pair via QR — see the **[mobile guide](docs/MOBILE.md)**.
 All versions: [Releases page](https://github.com/lapaasindia/calltrack-crm/releases).
 
 Because the app isn't code-signed with a paid developer certificate (it's free software):
-- **Mac**: if it says "can't be opened" → right-click the app → **Open** → Open (needed once).
-- **Windows**: if SmartScreen appears → **More info → Run anyway** (needed once).
+- **Mac**: if it says **"can't be opened"** → right-click the app → **Open** → **Open** (needed once).
+  If it says **"is damaged and can't be opened"** (common on Apple Silicon — M1/M2/M3/M4), that's macOS quarantine, not real damage. Drag the app into **Applications**, then open **Terminal** and run this once, then open the app normally:
+  ```bash
+  xattr -cr "/Applications/CallTrack CRM.app"
+  ```
+- **Windows**: the blue **"Windows protected your PC"** box (SmartScreen) → click **More info** → **Run anyway** (needed once).
 
 ## How it works in your office
 
