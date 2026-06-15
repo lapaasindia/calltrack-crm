@@ -41,6 +41,8 @@ Because the app isn't signed with a paid Apple/Microsoft certificate (it's free 
 
 **🪟 Windows 10/11** — the blue **"Windows protected your PC"** box (SmartScreen) → click **More info** → **Run anyway** (needed once).
 
+> **Trouble installing, opening, or pairing a phone?** See the **[Troubleshooting guide](docs/TROUBLESHOOTING.md)** — Mac "damaged", Windows SmartScreen, QR/phone pairing, and connection issues.
+
 ## How it works in your office
 
 CallTrack is **local-first**: one computer in your office is the **main computer (host)** — it holds the database and serves your office WiFi. Everyone else connects to it. Nothing is ever sent to the internet.

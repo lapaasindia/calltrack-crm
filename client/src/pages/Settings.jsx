@@ -12,9 +12,16 @@ function PairDeviceModal({ users, onClose }) {
   const generate = async () => {
     try {
       const res = await api.post('/api/devices/pairing-code', { user_id: Number(userId) });
-      const payload = JSON.stringify({ u: window.location.origin, c: res.code });
+      // The phone connects to whatever URL the QR contains, so it must be a LAN
+      // address the phone can reach. window.location.origin is 127.0.0.1 in the
+      // desktop app and a .local name some Android phones can't resolve — in
+      // those cases use a real LAN IP the server reported.
+      const host = window.location.hostname;
+      const needsLan = host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local');
+      const serverUrl = (needsLan && res.urls?.length) ? res.urls[0] : window.location.origin;
+      const payload = JSON.stringify({ u: serverUrl, c: res.code });
       const qr = await QRCode.toDataURL(payload, { width: 260, margin: 1 });
-      setPairing({ code: res.code, qr });
+      setPairing({ code: res.code, qr, url: serverUrl });
     } catch (err) { showToast(err.message, 'error'); }
   };
 
@@ -44,7 +51,7 @@ function PairDeviceModal({ users, onClose }) {
           </div>
           <p style={{ color: 'var(--ink-soft)', fontSize: 13.5 }}>
             In the CallTrack mobile app: <b>Scan this QR</b> (or type the code with the server
-            address <b>{window.location.origin}</b>). Valid for 15 minutes, works once.
+            address <b>{pairing.url}</b>). Valid for 15 minutes, works once.
           </p>
           <button className="btn block" onClick={onClose}>Done</button>
         </div>

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
@@ -13,6 +14,26 @@ function makeCode() {
   return Array.from(crypto.randomBytes(6), (b) => alphabet[b % alphabet.length]).join('');
 }
 
+// Reachable LAN URLs for this host. The phone connects to whatever address the
+// pairing QR contains, so it must be a real LAN IP — NOT 127.0.0.1/localhost
+// (which the desktop app's browser shows) nor a .local name (which some Android
+// phones can't resolve). We list every non-internal IPv4, putting the host IP
+// on the same /24 as the requesting admin first so a phone on the office WiFi
+// gets a directly-reachable address.
+function lanUrls(req) {
+  const port = (req.headers.host || '').split(':')[1] || req.socket.localPort || 3000;
+  const ips = [];
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces || []) {
+      if (iface.family === 'IPv4' && !iface.internal) ips.push(iface.address);
+    }
+  }
+  const clientNet = String(req.ip || '').replace(/^::ffff:/, '').split('.').slice(0, 3).join('.');
+  const net = (ip) => ip.split('.').slice(0, 3).join('.');
+  ips.sort((a, b) => Number(net(b) === clientNet) - Number(net(a) === clientNet));
+  return ips.map((ip) => `http://${ip}:${port}`);
+}
+
 router.post('/pairing-code', (req, res) => {
   const user = db.prepare('SELECT id FROM users WHERE id = ? AND is_active = 1')
     .get(Number(req.body.user_id));
@@ -22,7 +43,7 @@ router.post('/pairing-code', (req, res) => {
   db.prepare(
     'INSERT INTO pairing_codes (code, user_id, created_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(code, user.id, req.user.id, expiresAt, nowUtc());
-  res.json({ code, expires_at: expiresAt });
+  res.json({ code, expires_at: expiresAt, urls: lanUrls(req) });
 });
 
 router.get('/', (req, res) => {
