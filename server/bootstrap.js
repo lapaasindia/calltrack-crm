@@ -29,5 +29,15 @@ export function ensureBootstrapped() {
       'Hi {name}, {caller_name} from {company} here. Checking in — is everything going well with {product}? Happy to help with anything.', 4, now);
   }
 
+  // A fresh install needs at least one product, otherwise winning/converting a
+  // lead to a deal fails ("Pick a valid product") — the Win-Deal screen has an
+  // empty dropdown. Seed one neutral, clearly-editable default.
+  if (!db.prepare('SELECT id FROM products LIMIT 1').get()) {
+    db.prepare(
+      'INSERT INTO products (name, price_paise, description, created_at) VALUES (?, ?, ?, ?)'
+    ).run('Consultation', 0, 'Default product — rename it or add your own in Settings → Products.', now);
+    console.log('First run: created a default product (rename it in Settings → Products).');
+  }
+
   if (getSetting('company_name') === null) setSetting('company_name', 'Our Company');
 }

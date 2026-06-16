@@ -6,6 +6,7 @@ import path from 'node:path';
 import db from '../db.js';
 import { canAccessLead } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
+import { findLeadCandidates } from '../lib/leadMatch.js';
 import { CALL_TYPES, OUTCOMES } from './calls.js';
 import { RECORDINGS_BASE } from './sync.js';
 
@@ -13,6 +14,39 @@ const router = Router();
 
 const scope = (req, col = 'user_id') =>
   req.user.role === 'admin' ? { clause: '', params: [] } : { clause: `AND ${col} = ?`, params: [req.user.id] };
+
+// Move every pending captured call from `phone` onto `leadId` as real
+// (auto-logged) call rows — dedup-safe via idx_calls_mobile_dedupe — and relink
+// their recordings. Shared by "create lead" and "attach to existing lead".
+function mergeCapturedIntoLead(leadId, phone) {
+  const siblings = db.prepare(
+    "SELECT * FROM captured_calls WHERE phone = ? AND status = 'pending'"
+  ).all(phone);
+  const insertCall = db.prepare(
+    `INSERT INTO calls (lead_id, user_id, call_type, disposition, called_at,
+                        source, direction, call_log_ts, device_id, auto_logged, duration_seconds)
+     VALUES (?, ?, 'sales', ?, ?, 'mobile', ?, ?, ?, 1, ?)
+     ON CONFLICT DO NOTHING`
+  );
+  for (const c of siblings) {
+    insertCall.run(
+      leadId, c.user_id, c.duration_seconds > 0 ? 'connected' : 'not_picked',
+      new Date(c.call_log_ts).toISOString(), c.direction, c.call_log_ts, c.device_id,
+      c.duration_seconds
+    );
+    const callRow = db.prepare(
+      "SELECT id FROM calls WHERE user_id = ? AND call_log_ts = ? AND lead_id = ? AND source = 'mobile'"
+    ).get(c.user_id, c.call_log_ts, leadId);
+    db.prepare("UPDATE captured_calls SET status = 'lead_created', created_lead_id = ? WHERE id = ?")
+      .run(leadId, c.id);
+    if (callRow) {
+      db.prepare(
+        `UPDATE recordings SET call_id = ?, captured_call_id = NULL, match_status = 'matched'
+         WHERE captured_call_id = ?`
+      ).run(callRow.id, c.id);
+    }
+  }
+}
 
 // Badge counts for the nav.
 router.get('/summary', (req, res) => {
@@ -42,6 +76,9 @@ router.get('/captured', (req, res) => {
      WHERE c.status = 'pending' ${s.clause}
      ORDER BY c.call_log_ts DESC LIMIT 200`
   ).all(...s.params);
+  // Surface existing leads this number may belong to, so the reviewer can
+  // attach to the existing lead instead of creating a duplicate.
+  for (const r of rows) r.lead_candidates = findLeadCandidates(r.phone, req.user);
   res.json(rows);
 });
 
@@ -64,38 +101,47 @@ router.post('/captured/:id/create-lead', (req, res) => {
       ).run(name, captured.phone, captured.phone, captured.user_id, nowUtc(), nowUtc());
       lead = { id: info.lastInsertRowid };
     }
-    // Move every pending captured call from this number into real call rows.
-    const siblings = db.prepare(
-      "SELECT * FROM captured_calls WHERE phone = ? AND status = 'pending'"
-    ).all(captured.phone);
-    const insertCall = db.prepare(
-      `INSERT INTO calls (lead_id, user_id, call_type, disposition, called_at,
-                          source, direction, call_log_ts, device_id, auto_logged, duration_seconds)
-       VALUES (?, ?, 'sales', ?, ?, 'mobile', ?, ?, ?, 1, ?)
-       ON CONFLICT DO NOTHING`
-    );
-    for (const c of siblings) {
-      insertCall.run(
-        lead.id, c.user_id, c.duration_seconds > 0 ? 'connected' : 'not_picked',
-        new Date(c.call_log_ts).toISOString(), c.direction, c.call_log_ts, c.device_id,
-        c.duration_seconds
-      );
-      const callRow = db.prepare(
-        "SELECT id FROM calls WHERE user_id = ? AND call_log_ts = ? AND lead_id = ? AND source = 'mobile'"
-      ).get(c.user_id, c.call_log_ts, lead.id);
-      db.prepare("UPDATE captured_calls SET status = 'lead_created', created_lead_id = ? WHERE id = ?")
-        .run(lead.id, c.id);
-      if (callRow) {
-        db.prepare(
-          `UPDATE recordings SET call_id = ?, captured_call_id = NULL, match_status = 'matched'
-           WHERE captured_call_id = ?`
-        ).run(callRow.id, c.id);
-      }
-    }
+    mergeCapturedIntoLead(lead.id, captured.phone);
     return lead.id;
   })();
 
   res.json({ ok: true, lead_id: leadId });
+});
+
+// Attach a captured (unknown-number) call to an EXISTING lead instead of
+// creating a duplicate — optionally scheduling a follow-up on that lead.
+router.post('/captured/:id/attach-existing', (req, res) => {
+  const captured = db.prepare('SELECT * FROM captured_calls WHERE id = ?').get(req.params.id);
+  if (!captured || captured.status !== 'pending') return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'admin' && captured.user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your captured call' });
+  }
+  const lead = db.prepare('SELECT * FROM leads WHERE id = ? AND deleted_at IS NULL')
+    .get(Number(req.body.lead_id));
+  if (!lead) return res.status(400).json({ error: 'Lead not found' });
+  if (!canAccessLead(req.user, lead)) return res.status(403).json({ error: 'No access to that lead' });
+
+  const asFollowUp = !!req.body.as_follow_up;
+  let dueAt = null;
+  if (asFollowUp) {
+    const t = Date.parse(req.body.follow_up_at || '');
+    dueAt = new Date(Number.isNaN(t) ? Date.now() + 86400000 : t).toISOString();
+  }
+
+  db.transaction(() => {
+    mergeCapturedIntoLead(lead.id, captured.phone);
+    if (asFollowUp) {
+      // One pending follow-up per lead (idx_followups_one_pending): replace it.
+      db.prepare("UPDATE follow_ups SET status = 'cancelled' WHERE lead_id = ? AND status = 'pending'")
+        .run(lead.id);
+      db.prepare(
+        `INSERT INTO follow_ups (lead_id, assigned_to, due_at, reason, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(lead.id, lead.assigned_to || req.user.id, dueAt, 'Repeat call — from synced number', nowUtc());
+    }
+  })();
+
+  res.json({ ok: true, lead_id: lead.id });
 });
 
 router.post('/captured/:id/ignore', (req, res) => {

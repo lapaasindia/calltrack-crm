@@ -52,6 +52,19 @@ export default function Review() {
     } catch (err) { showToast(err.message, 'error'); }
   };
 
+  // Attach a captured call to an existing lead instead of making a duplicate.
+  const attachExisting = async (row, cand, asFollowUp) => {
+    try {
+      await api.post(`/api/review/captured/${row.id}/attach-existing`, {
+        lead_id: cand.id,
+        as_follow_up: asFollowUp,
+        follow_up_at: asFollowUp ? new Date(Date.now() + 86400000).toISOString() : undefined,
+      });
+      showToast(asFollowUp ? `Logged under ${cand.name} + follow-up ✓` : `Logged under ${cand.name} ✓`);
+      load();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   const attach = async (rec, candidate) => {
     try {
       await api.post(`/api/review/recordings/${rec.id}/attach`, {
@@ -95,6 +108,22 @@ export default function Review() {
                   <div className="meta">
                     {DIR_ICON[c.direction]} {c.direction} · {fmtDur(c.duration_seconds)} · {fmtDateTime(new Date(c.call_log_ts).toISOString())} · {c.user_name}
                   </div>
+                  {c.lead_candidates?.length > 0 && (
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      <span style={{ color: 'var(--ink-soft)' }}>Looks like an existing lead — log it there instead of creating a new one:</span>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                        {c.lead_candidates.map((cand) => (
+                          <span key={cand.id} style={{ display: 'inline-flex', gap: 4 }}>
+                            <button className="btn small green" onClick={() => attachExisting(c, cand, false)}>
+                              Log under {cand.name}{cand.match === 'alt_phone' ? ' (alt #)' : ''}
+                            </button>
+                            <button className="btn small secondary" title="Log the call and schedule a follow-up tomorrow"
+                              onClick={() => attachExisting(c, cand, true)}>+ follow-up</button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="actions" style={{ flexWrap: 'wrap' }}>
                   <a className="act-btn call" href={telLink(c.phone)} title="Call back">📞</a>

@@ -228,6 +228,68 @@ test('tasks: create, appear in today queue, complete', async () => {
   assert.equal(done.status, 200);
 });
 
+test('fresh install seeds a product so a lead converts to a deal out of the box', async () => {
+  // Regression: bootstrap previously seeded no product, so winning a deal 400'd
+  // ("Pick a valid product") on every fresh install.
+  const products = await api('/api/products', { cookie: adminCookie });
+  assert.equal(products.status, 200);
+  assert.ok(products.data.length >= 1, 'a default product exists on a fresh install');
+  const productId = products.data[0].id;
+
+  const lead = await api('/api/leads', {
+    method: 'POST', cookie: adminCookie,
+    body: { name: 'Deal Lead', phone: '9811122233', assigned_to: 1 },
+  });
+  const deal = await api(`/api/leads/${lead.data.id}/deals`, {
+    method: 'POST', cookie: adminCookie,
+    body: { product_id: productId, deal_value_rupees: 5000 },
+  });
+  assert.equal(deal.status, 200, 'deal created out of the box');
+
+  const detail = await api(`/api/leads/${lead.data.id}`, { cookie: adminCookie });
+  assert.equal(detail.data.stage, 'won', 'lead marked won');
+  assert.ok(detail.data.deals?.length >= 1, 'deal recorded on the lead');
+});
+
+test('repeat call on an existing lead\'s alt number attaches to it, no duplicate', async () => {
+  // A lead whose PRIMARY phone differs from the called number; the called number
+  // is its secondary (alt) phone, so sync (primary-only) can't match it and it
+  // lands in the captured queue.
+  const lead = await api('/api/leads', {
+    method: 'POST', cookie: adminCookie,
+    body: { name: 'Repeat Caller', phone: '9700000001', alt_phone: '9700000002', assigned_to: 1 },
+  });
+  const existingLeadId = lead.data.id;
+
+  const synced = await api('/api/sync/calls', {
+    method: 'POST', token: deviceToken,
+    body: { calls: [{ call_log_ts: Date.now() - 120000, phone: '9700000002', direction: 'outgoing', duration_seconds: 75 }] },
+  });
+  assert.equal(synced.data.results[0].status, 'captured');
+
+  // The captured row offers the existing lead as a candidate (alt-phone match).
+  const captured = await api('/api/review/captured', { cookie: adminCookie });
+  const row = captured.data.find((c) => c.phone === '9700000002');
+  assert.ok(row, 'captured call visible');
+  const cand = (row.lead_candidates || []).find((x) => x.id === existingLeadId);
+  assert.ok(cand, 'existing lead offered as a candidate');
+  assert.equal(cand.match, 'alt_phone');
+
+  // Attach to the existing lead + schedule a follow-up — no new lead created.
+  const attach = await api(`/api/review/captured/${row.id}/attach-existing`, {
+    method: 'POST', cookie: adminCookie,
+    body: { lead_id: existingLeadId, as_follow_up: true },
+  });
+  assert.equal(attach.status, 200);
+
+  const detail = await api(`/api/leads/${existingLeadId}`, { cookie: adminCookie });
+  assert.ok(detail.data.calls.some((c) => c.duration_seconds === 75), 'captured call moved onto the existing lead');
+  assert.ok(detail.data.follow_up, 'a follow-up was scheduled');
+
+  const after = await api('/api/review/captured', { cookie: adminCookie });
+  assert.ok(!after.data.some((c) => c.phone === '9700000002'), 'captured row consumed, no duplicate');
+});
+
 test('revoked device gets 401 immediately', async () => {
   const devices = await api('/api/devices', { cookie: adminCookie });
   const dev = devices.data.find((d) => !d.revoked_at);

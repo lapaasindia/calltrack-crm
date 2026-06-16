@@ -85,14 +85,22 @@ function WinDealModal({ lead, onClose, onSaved }) {
 
   return (
     <Modal title={`Win deal — ${lead.name}`} onClose={onClose}>
-      <div className="field">
-        <label>Product / program</label>
-        <select value={productId} onChange={(e) => pickProduct(e.target.value)}>
-          {products.map((p) => (
-            <option key={p.id} value={p.id}>{p.name} — {rupees(p.price_paise)}</option>
-          ))}
-        </select>
-      </div>
+      {products.length === 0 ? (
+        <div className="field">
+          <div className="err">
+            No active products yet. Add one in <b>Settings → Products</b> before winning a deal.
+          </div>
+        </div>
+      ) : (
+        <div className="field">
+          <label>Product / program</label>
+          <select value={productId} onChange={(e) => pickProduct(e.target.value)}>
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>{p.name} — {rupees(p.price_paise)}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="form-grid">
         <div className="field">
           <label>Deal value (₹)</label>
