@@ -66,6 +66,11 @@ So `Scanner.scanBarcode({ hint: 17 })` → `res.ScanResult` is **already correct
 
 ## 3. EXACT changes
 
+> ⚠️ **JitPack token REQUIRED (verified by an actual build, 2026-06-16).** This plugin's native lib `com.github.outsystems:osbarcode-android` is hosted on **JitPack**, which now rejects anonymous requests with `HTTP 401 ("no token provided")`. The build will fail at `:app:checkDebugAarMetadata` without a token. Fix (already wired into `mobile/android/build.gradle` — the JitPack repo block reads a token):
+> 1. Go to **https://jitpack.io**, sign in with GitHub, and copy your auth token (Account/profile → it looks like `jp_xxxxxxxx`).
+> 2. Add it to **`~/.gradle/gradle.properties`** on the build machine: `jitpackToken=jp_xxxxxxxx` (or `export JITPACK_TOKEN=jp_xxxxxxxx`).
+> 3. Re-run the build. (§B sync and §C recording build fine WITHOUT this — only the QR scanner needs it.)
+
 ### 3a. Install the plugin (repo root)
 
 ```bash

@@ -23,8 +23,18 @@ allprojects {
         google()
         mavenCentral()
         // @capacitor/barcode-scanner's native lib (com.github.outsystems:osbarcode-android)
-        // is published on JitPack.
-        maven { url 'https://jitpack.io' }
+        // is on JitPack, which now requires an auth token. Create a free token at
+        // https://jitpack.io (sign in with GitHub → Authorize), then put it in your
+        // ~/.gradle/gradle.properties as:  jitpackToken=jp_xxxxxxxx
+        // (or export JITPACK_TOKEN). Without it the build fails to resolve the QR
+        // scanner's AAR (HTTP 401 from JitPack).
+        maven {
+            url 'https://jitpack.io'
+            def jpToken = project.findProperty('jitpackToken') ?: System.getenv('JITPACK_TOKEN')
+            if (jpToken) {
+                credentials { username = jpToken }
+            }
+        }
     }
 }
 
