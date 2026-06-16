@@ -23,11 +23,19 @@ Exact, build-ready changes for the three Android-app issues that **cannot be bui
 
 ```bash
 cd "/Users/sahilkhanna/Desktop/CRM FABLE"
+npm install                               # pulls @capacitor/barcode-scanner@1.0.4
+
+# QR scanner: its native AAR is on JitPack, which now needs a token.
+# Put your free token (jitpack.io → sign in with GitHub) in ~/.gradle/gradle.properties:
+#   jitpackToken=jp_xxxxxxxx          (or:  export JITPACK_TOKEN=jp_xxxxxxxx)
+# Without it the build fails at :app:checkDebugAarMetadata with HTTP 401.
+
 npx cap sync android                      # copy web assets + regenerate native plugin wiring
-# then build the signed release APK (Android Studio: Build > Generate Signed Bundle/APK,
-# or from CLI):
+# build (Android Studio: Build > Generate Signed Bundle/APK, or CLI):
 cd mobile/android && ./gradlew assembleRelease
 ```
+
+> **Release build / R8:** the release buildType has `minifyEnabled false`, so **R8/ProGuard does not run** — no keep rules are needed for the new foreground service, receiver, or worker. (Verified here: §B + §C compile to a debug APK with zero errors.) If you ever set `minifyEnabled true`, those components are still safe — they're kept by AGP's manifest-derived rules plus AndroidX WorkManager / Capacitor consumer ProGuard rules. The only thing blocking a full build is the JitPack token above.
 
 Then ship it the same way 1.1.x was shipped:
 1. Copy the signed APK to `data/apk/calltrack.apk` (the server serves it at `/download/calltrack.apk`) and bump `data/apk/version.json` (`versionCode`/`versionName`) so paired phones see the update.
