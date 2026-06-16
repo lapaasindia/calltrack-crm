@@ -236,7 +236,7 @@ async function renderReview() {
       <div class="card" style="margin-bottom:9px">
         <div class="name" style="font-weight:700">${c.name}</div>
         <div class="meta" style="color:var(--ink-soft);font-size:12.5px;margin:3px 0 9px">${fmtDur(c.duration_seconds)} · ${fmtTime(Date.parse(c.called_at))}</div>
-        ${c.recording_id ? `<audio controls preload="none" style="width:100%;height:36px;margin-bottom:8px" src="${cfg.serverUrl}/api/review/audio/${c.recording_id}#t=0"></audio>` : ''}
+        ${c.recording_id ? `<audio controls preload="none" style="width:100%;height:36px;margin-bottom:8px" src="${cfg.serverUrl}/api/review/audio/${c.recording_id}?token=${encodeURIComponent(cfg.token)}#t=0"></audio>` : ''}
         <div class="btn-row">
           ${['interested|😊 Interested', 'not_interested|🙅 Not', 'callback_requested|📞 Callback'].map((o) => {
             const [v, l] = o.split('|');

@@ -143,6 +143,13 @@ test('recording upload matches the connected call via filename number', async ()
     headers: { Cookie: adminCookie },
   });
   assert.equal(audio.status, 200);
+
+  // Mobile <audio> can't send an Authorization header — it must authenticate
+  // via ?token= (this is the playback-on-phone fix). No auth at all → 401.
+  const viaToken = await fetch(`${baseUrl}/api/review/audio/${call.recording_id}?token=${deviceToken}`);
+  assert.equal(viaToken.status, 200, 'audio streams with ?token= (mobile playback)');
+  const noAuth = await fetch(`${baseUrl}/api/review/audio/${call.recording_id}`);
+  assert.equal(noAuth.status, 401, 'audio requires auth');
 });
 
 test('ambiguous recording lands in review queue, manual attach works', async () => {

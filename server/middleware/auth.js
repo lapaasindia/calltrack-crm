@@ -7,7 +7,12 @@ export const hashToken = (token) =>
 // Attaches req.user from the session, or from a paired device's bearer token
 // (mobile app). 401 if neither is valid.
 export function requireAuth(req, res, next) {
-  const bearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  // Paired-device auth normally comes from the Authorization header. Media URLs
+  // loaded by an <audio>/<img> tag can't set headers, so we also accept the
+  // token as a ?token= query param (LAN-only; lets the mobile app stream
+  // recordings). Session auth is unaffected.
+  const bearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1]
+    || (typeof req.query.token === 'string' ? req.query.token : undefined);
   if (bearer) {
     const device = db.prepare(
       'SELECT * FROM device_tokens WHERE token_hash = ? AND revoked_at IS NULL'
