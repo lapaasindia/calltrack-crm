@@ -36,7 +36,7 @@ import { startAiWorker } from './lib/ai.js';
 import { startRetentionJob } from './lib/recordingsRetention.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const APP_VERSION = '1.1.1';
+export const APP_VERSION = '1.2.0';
 
 export function lanAddresses() {
   const addrs = [];
