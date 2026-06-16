@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^6.2.1",
+    "@capacitor/barcode-scanner": "1.0.4",
     "@capacitor/core": "^6.2.1",
     "@capacitor/preferences": "^6.0.4",
     "bcryptjs": "^2.4.3",

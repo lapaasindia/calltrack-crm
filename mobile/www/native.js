@@ -16,6 +16,10 @@ const mock = {
   async openAllFilesAccess() {},
   async openBatterySettings() {},
   async openAutostartSettings() {},
+  async startBackgroundService() { return { started: false }; },
+  async stopBackgroundService() { return { started: false }; },
+  async pickRecordingsFolder() { return { picked: false }; },
+  async requestMediaAudio() { return { granted: false }; },
   async configure() {},
   async syncNow() { return { calls: 0, recordings: 0, errors: ['Not on a real device'] }; },
   async checkForUpdate() { return { updateAvailable: false }; },
@@ -32,6 +36,10 @@ export const Native = {
   openAllFilesAccess: () => P.openAllFilesAccess(),
   openBatterySettings: () => P.openBatterySettings(),
   openAutostartSettings: () => P.openAutostartSettings(),
+  startBackgroundService: () => P.startBackgroundService(),
+  stopBackgroundService: () => P.stopBackgroundService(),
+  pickRecordingsFolder: () => P.pickRecordingsFolder(),
+  requestMediaAudio: () => P.requestMediaAudio(),
   // Hand the native side the server URL + bearer token so its WorkManager
   // jobs can sync in the background without the WebView being open.
   configure: (cfg) => P.configure(cfg),

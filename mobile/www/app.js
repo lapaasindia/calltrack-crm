@@ -52,13 +52,19 @@ let route = 'home';
 let lastState = null;
 
 // ===================== PAIRING =====================
+// Returns: { raw } on success, { unavailable:true } if the plugin isn't
+// installed (browser/dev), or null if the user cancelled / scan failed.
 async function scanQr() {
   const Scanner = window.Capacitor?.Plugins?.CapacitorBarcodeScanner;
-  if (!Scanner) return null;
+  if (!Scanner) return { unavailable: true };
   try {
-    const res = await Scanner.scanBarcode({ hint: 17 }); // QR_CODE
-    return res?.ScanResult || null;
-  } catch { return null; }
+    // hint 17 = ALL barcode types (CapacitorBarcodeScannerTypeHint.ALL).
+    // The pairing QR is a QR code; ALL also reads it and is more forgiving.
+    const res = await Scanner.scanBarcode({ hint: 17 });
+    return { raw: res?.ScanResult || null };
+  } catch {
+    return null; // cancelled or camera/permission denied
+  }
 }
 
 function renderPairing(error) {
@@ -81,10 +87,11 @@ function renderPairing(error) {
     </div>`;
 
   document.getElementById('scan').onclick = async () => {
-    const raw = await scanQr();
-    if (!raw) return toast('Could not scan — type the code instead', true);
+    const r = await scanQr();
+    if (r?.unavailable) return toast('Scanner not available — type the code instead', true);
+    if (!r?.raw) return toast('Scan cancelled — or type the code instead', true);
     try {
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(r.raw);
       await doPair(parsed.u, parsed.c);
     } catch { toast('That QR is not a CallTrack pairing code', true); }
   };
@@ -146,11 +153,15 @@ async function renderSetup() {
       <div class="card">
         <h2>Finish setup — ${cfg.userName}</h2>
         ${step(s.permissions.callLog, 'Call log access', 'So calls attach to leads automatically', 'perms', 'Allow')}
-        ${step(s.permissions.storage, 'Recordings access', 'To upload your call recordings', 'files', 'Allow')}
+        ${step(s.permissions.storage, 'Recordings access (all files)', 'Lets us read your dialer’s recordings folder', 'files', 'Allow')}
+        ${step(s.permissions.mediaAudio, 'Audio access', 'Second way to find recordings (Android 13+)', 'mediaaudio', 'Allow')}
+        ${step(false, 'Turn ON call recording in your dialer', 'CallTrack never records — your Phone app does. Enable it once.', 'dialerrec', 'Open')}
+        ${step(s.safFolderPicked, 'Pick your recordings folder', 'Tap, then choose the folder your Phone app saves recordings to', 'safpick', 'Choose')}
         ${step(!s.batteryOptimized, 'Battery: no restrictions', 'So syncing keeps working in the background', 'battery', 'Open')}
         ${step(false, 'Auto-start (Xiaomi/Oppo/Vivo)', 'Skip on Samsung. Lets the app restart itself', 'autostart', 'Open')}
       </div>
-      <button class="btn" id="done">Done — start using CallTrack</button>
+      <button class="btn" id="done" ${s.batteryOptimized ? 'disabled' : ''}>Done — start using CallTrack</button>
+      ${s.batteryOptimized ? '<div class="muted" style="text-align:center;margin-top:8px">Turn off battery restrictions above so calls keep syncing when the app is closed.</div>' : ''}
       <button class="btn ghost" id="resync" style="margin-top:10px">Sync my calls now</button>
     </div>`;
   app.querySelectorAll('[data-act]').forEach((b) => {
@@ -158,12 +169,27 @@ async function renderSetup() {
       const a = b.dataset.act;
       if (a === 'perms') await Native.requestPermissions();
       else if (a === 'files') await Native.openAllFilesAccess();
+      else if (a === 'mediaaudio') await Native.requestMediaAudio();
+      else if (a === 'safpick') {
+        const r = await Native.pickRecordingsFolder();
+        if (r && r.picked) toast('Recordings folder linked');
+      }
+      else if (a === 'dialerrec') {
+        // No public API to deep-link every OEM dialer's record toggle.
+        // Open the dialer; the user flips "Call recording" on once.
+        await Native.openAutostartSettings(); // falls back to app settings; replace with openDialerRecordingSettings if you add it
+        toast('In your Phone app: Settings → Call recording → On', false);
+      }
       else if (a === 'battery') await Native.openBatterySettings();
       else if (a === 'autostart') await Native.openAutostartSettings();
       setTimeout(renderSetup, 600);
     };
   });
-  document.getElementById('done').onclick = () => { route = 'home'; render(); };
+  document.getElementById('done').onclick = async () => {
+    if (isNative) { try { await Native.startBackgroundService(); } catch {} }
+    route = 'home';
+    render();
+  };
   document.getElementById('resync').onclick = doSync;
 }
 
