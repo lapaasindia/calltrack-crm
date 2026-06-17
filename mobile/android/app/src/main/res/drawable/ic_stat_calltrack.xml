@@ -1,0 +1,14 @@
+<!-- Notification status-bar icon for WhatsApp / message alerts.
+     Android status-bar icons must be a flat white silhouette on transparent;
+     the system applies the tint (capacitor.config.json sets iconColor #1f7a4d).
+     A simple Material "chat bubble" works for message notifications. Swap for a
+     density-set of white PNGs if a specific OEM renders the vector poorly. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M20,2H4C2.9,2 2,2.9 2,4v18l4,-4h14c1.1,0 2,-0.9 2,-2V4C22,2.9 21.1,2 20,2zM18,14H6v-2h12V14zM18,11H6V9h12V11zM18,8H6V6h12V8z" />
+</vector>

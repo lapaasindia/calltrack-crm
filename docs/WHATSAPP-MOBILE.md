@@ -13,38 +13,30 @@ from `/api/whatsapp/unread`), so the same inbound never raises two notifications
 and the `wa_since` watermark in `@capacitor/preferences` stops old messages from
 re-notifying after a reopen.
 
-What is **NOT** done here (no Android SDK / device in this environment) and must
-be run on a machine with the Android toolchain:
+**Most of the wiring is already committed in the repo.** Only the steps that need
+the Android toolchain (Android Studio + SDK) remain — there is no Android SDK/device
+in the dev/build sandbox, so the APK itself must be built on your Mac with Android
+Studio installed.
 
-## 1. Add the local-notifications plugin
+## Already done (in the repo)
+- ✅ `@capacitor/local-notifications@^6.1.3` is in `package.json` (matches Capacitor 6).
+- ✅ `POST_NOTIFICATIONS` is in `mobile/android/app/src/main/AndroidManifest.xml`.
+- ✅ Status-bar icon `ic_stat_calltrack` at
+  `mobile/android/app/src/main/res/drawable/ic_stat_calltrack.xml` (white silhouette;
+  swap for white PNGs in `drawable-*dpi/` if a specific OEM renders the vector poorly).
+- ✅ `capacitor.config.json` sets the notification `smallIcon` + `iconColor`.
+- ✅ WebView **Chats** tab + 30s `/api/whatsapp/unread` poll + `Native.notify()` bridge
+  (`mobile/www/app.js` / `native.js`), feature-gated on the server's `whatsapp_enabled`.
+
+## Remaining: sync + build (run at the REPO ROOT — not `mobile/`)
+The Capacitor project is rooted at the repo root (`capacitor.config.json` lives here),
+so use plain `npx cap …` — **not** `--prefix mobile`:
 ```bash
-npm --prefix mobile i @capacitor/local-notifications
-npx --prefix mobile cap sync android
+npm install            # installs @capacitor/local-notifications (already in package.json)
+npx cap sync android   # wires the plugin's native module into mobile/android
 ```
-The WebView calls `window.Capacitor.Plugins.LocalNotifications` directly and
-guards for its absence, so the JS already ships safely without the plugin — but
-no notification fires until the plugin is installed + synced.
-
-Pin a **Capacitor 6-compatible** release (`@capacitor/local-notifications@6`)
-so it matches the rest of the `@capacitor/*` packages in `mobile/`; a v7 plugin
-will fail `cap sync` against a Capacitor 6 project.
-
-## 2. Android manifest
-`@capacitor/local-notifications` needs, on Android 13+:
-```xml
-<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-```
-The WebView requests the runtime permission on boot via
-`Native.requestNotificationPermission()` (which calls
-`LocalNotifications.requestPermissions()`), but the manifest entry must exist.
-
-## 2a. Small-icon drawable
-`capacitor.config.json` sets the notification `smallIcon` to `ic_stat_calltrack`
-(`iconColor` `#1f7a4d`). Android status-bar icons must be a **white-on-transparent**
-silhouette. Add a drawable named `ic_stat_calltrack` at
-`mobile/android/app/src/main/res/drawable*/ic_stat_calltrack.png` (or a vector).
-If the drawable is missing the plugin falls back to the app icon, which renders as
-a grey square on some OEMs — so add it before the device test.
+The WebView guards for the plugin's absence, so nothing breaks before this — but no
+notification fires until the plugin is synced into the native project.
 
 ## 3. Background polling (app closed) — foreground service
 The LAN deployment has **no FCM / internet push**. While the WebView is open it
@@ -60,13 +52,16 @@ the existing call-capture **foreground service** (the `CallObserverService` in
 
 Keep the cadence modest (30–60s) to protect battery on Indian OEMs.
 
-## 4. Build + device test
+## 4. Build + device test (on a Mac with Android Studio)
 ```bash
-npm --prefix mobile run build        # if the WebView has a build step
-npx --prefix mobile cap sync android
-# open mobile/android in Android Studio → Run on a device, or:
-cd mobile/android && ./gradlew assembleDebug
+npm install
+npx cap sync android
+# then EITHER open mobile/android in Android Studio → Run on a device, OR:
+cd mobile/android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
 ```
+(There is no `mobile/www` build step — those are static files served straight into
+the WebView.) Bump the version in `mobile/android/app/build.gradle` if you're cutting
+a release APK, per the project's release ritual.
 Then on the device:
 1. Pair the phone to the LAN server as usual.
 2. In the **web** Settings (owner), connect WhatsApp and scan the QR with the
