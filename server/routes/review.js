@@ -5,6 +5,7 @@ import { Router } from 'express';
 import path from 'node:path';
 import db from '../db.js';
 import { canAccessLead } from '../middleware/auth.js';
+import { signMediaTicket } from '../lib/mediaTicket.js';
 import { nowUtc } from '../lib/istTime.js';
 import { findLeadCandidates } from '../lib/leadMatch.js';
 import { CALL_TYPES, OUTCOMES } from './calls.js';
@@ -255,18 +256,40 @@ router.patch('/calls/:id', (req, res) => {
 });
 
 // ---------- audio streaming (browser + app) ----------
-router.get('/audio/:id', (req, res) => {
-  const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(req.params.id);
-  if (!rec) return res.status(404).json({ error: 'Not found' });
-  // Access: your own upload, admin, or anyone who can access the linked lead.
-  let allowed = req.user.role === 'admin' || rec.user_id === req.user.id;
-  if (!allowed && rec.call_id) {
+// Access: your own upload, admin, or anyone who can access the linked lead.
+function canAccessRecording(user, rec) {
+  if (user.role === 'admin' || rec.user_id === user.id) return true;
+  if (rec.call_id) {
     const lead = db.prepare(
       'SELECT l.* FROM leads l JOIN calls c ON c.lead_id = l.id WHERE c.id = ?'
     ).get(rec.call_id);
-    allowed = canAccessLead(req.user, lead);
+    return canAccessLead(user, lead);
   }
-  if (!allowed) return res.status(403).json({ error: 'No access' });
+  return false;
+}
+
+// Mint a short-lived, single-recording ticket (audit M-2/L-1). The mobile app
+// calls this with its Authorization header, then puts the returned ticket in the
+// <audio> URL — so the long-lived device token never lands in WebView history.
+router.post('/audio/:id/ticket', (req, res) => {
+  const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Not found' });
+  if (!canAccessRecording(req.user, rec)) return res.status(403).json({ error: 'No access' });
+  const ticket = signMediaTicket({ userId: req.user.id, recordingId: rec.id });
+  res.json({ ticket });
+});
+
+router.get('/audio/:id', (req, res) => {
+  const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Not found' });
+  // A media ticket (set by requireAuth) authorizes ONLY the recording it was
+  // minted for — re-scope it to this :id. Session/bearer requests fall through
+  // to the normal per-recording access check.
+  if (req.mediaTicket) {
+    if (req.mediaTicket.recordingId !== rec.id) return res.status(403).json({ error: 'No access' });
+  } else if (!canAccessRecording(req.user, rec)) {
+    return res.status(403).json({ error: 'No access' });
+  }
   res.sendFile(path.join(RECORDINGS_BASE, rec.file_path));
 });
 

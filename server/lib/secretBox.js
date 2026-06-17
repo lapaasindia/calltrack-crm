@@ -15,6 +15,9 @@ function boxKey() {
   const secretFile = path.join(DATA_DIR, 'secret.key');
   let secret;
   if (fs.existsSync(secretFile)) {
+    // Re-assert 0o600 in case the key was restored/copied with loose perms
+    // (audit L-3); this file roots both session signing and the secret box.
+    try { fs.chmodSync(secretFile, 0o600); } catch { /* best effort */ }
     secret = fs.readFileSync(secretFile, 'utf8');
   } else {
     // Tests / tools may touch settings before createApp() ran. Create it the

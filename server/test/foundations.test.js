@@ -60,14 +60,14 @@ test('new wider roles are accepted, unknown roles rejected', async () => {
   // A manager (new role) can be created with a department.
   const created = await api('/api/users', {
     method: 'POST', cookie: adminCookie,
-    body: { username: 'mgr1', full_name: 'Manager One', password: 'secret9', role: 'manager', department: 'Sales' },
+    body: { username: 'mgr1', full_name: 'Manager One', password: 'secret99', role: 'manager', department: 'Sales' },
   });
   assert.equal(created.status, 200);
 
   // read_only is a valid role too.
   const ro = await api('/api/users', {
     method: 'POST', cookie: adminCookie,
-    body: { username: 'viewer1', full_name: 'View Only', password: 'secret9', role: 'read_only' },
+    body: { username: 'viewer1', full_name: 'View Only', password: 'secret99', role: 'read_only' },
   });
   assert.equal(ro.status, 200);
 
@@ -84,7 +84,7 @@ test('new wider roles are accepted, unknown roles rejected', async () => {
 });
 
 test('manager authorizes as admin tier; read_only blocked from owner writes', async () => {
-  const mgrCookie = await loginCookie('mgr1', 'secret9');
+  const mgrCookie = await loginCookie('mgr1', 'secret99');
   // Manager (isAdmin tier) can manage team — list users (requireAdmin).
   const asMgr = await api('/api/users', { cookie: mgrCookie });
   assert.equal(asMgr.status, 200);
@@ -97,7 +97,7 @@ test('manager authorizes as admin tier; read_only blocked from owner writes', as
   const mgrAudit = await api('/api/audit', { cookie: mgrCookie });
   assert.equal(mgrAudit.status, 403);
 
-  const roCookie = await loginCookie('viewer1', 'secret9');
+  const roCookie = await loginCookie('viewer1', 'secret99');
   // read_only cannot manage team (requireAdmin).
   const roUsers = await api('/api/users', { cookie: roCookie });
   assert.equal(roUsers.status, 403);
@@ -144,26 +144,26 @@ test('notifications: create, list with unread count, read-all', async () => {
 });
 
 test('privilege escalation: manager cannot create or promote into the owner tier', async () => {
-  const mgrCookie = await loginCookie('mgr1', 'secret9');
+  const mgrCookie = await loginCookie('mgr1', 'secret99');
 
   // A manager (isAdmin, NOT isOwner) must not be able to mint a super_admin.
   const createSuper = await api('/api/users', {
     method: 'POST', cookie: mgrCookie,
-    body: { username: 'sneaky_super', full_name: 'Sneaky', password: 'secret9', role: 'super_admin' },
+    body: { username: 'sneaky_super', full_name: 'Sneaky', password: 'secret99', role: 'super_admin' },
   });
   assert.equal(createSuper.status, 403, 'manager cannot create a super_admin');
 
   // ...nor an admin.
   const createAdmin = await api('/api/users', {
     method: 'POST', cookie: mgrCookie,
-    body: { username: 'sneaky_admin', full_name: 'Sneaky2', password: 'secret9', role: 'admin' },
+    body: { username: 'sneaky_admin', full_name: 'Sneaky2', password: 'secret99', role: 'admin' },
   });
   assert.equal(createAdmin.status, 403, 'manager cannot create an admin');
 
   // A manager CAN still create a non-owner (e.g. a caller).
   const createCaller = await api('/api/users', {
     method: 'POST', cookie: mgrCookie,
-    body: { username: 'plain_caller', full_name: 'Caller', password: 'secret9', role: 'caller' },
+    body: { username: 'plain_caller', full_name: 'Caller', password: 'secret99', role: 'caller' },
   });
   assert.equal(createCaller.status, 200, 'manager can still create a caller');
 
@@ -176,7 +176,7 @@ test('privilege escalation: manager cannot create or promote into the owner tier
   // The owner (admin bootstrap) CAN create an owner-tier account.
   const ownerCreate = await api('/api/users', {
     method: 'POST', cookie: adminCookie,
-    body: { username: 'real_super', full_name: 'Real Super', password: 'secret9', role: 'super_admin' },
+    body: { username: 'real_super', full_name: 'Real Super', password: 'secret99', role: 'super_admin' },
   });
   assert.equal(ownerCreate.status, 200, 'owner can create a super_admin');
 });

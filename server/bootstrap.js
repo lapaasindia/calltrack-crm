@@ -9,10 +9,20 @@ export function ensureBootstrapped() {
   const now = nowUtc();
 
   if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
+    // First-run admin. If CRM_ADMIN_PASSWORD is set (advanced/automated setups)
+    // use it and don't force a change; otherwise fall back to the well-known
+    // 'admin123' but flag must_change_password so the account is locked to the
+    // change-password endpoint until the operator picks a real password. This
+    // closes the "default credential stays valid forever" hole (audit H-1).
+    const envPw = process.env.CRM_ADMIN_PASSWORD && String(process.env.CRM_ADMIN_PASSWORD);
+    const password = envPw || 'admin123';
+    const mustChange = envPw ? 0 : 1;
     db.prepare(
-      'INSERT INTO users (username, password_hash, full_name, role, created_at) VALUES (?, ?, ?, ?, ?)'
-    ).run('admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', now);
-    console.log('First run: created admin user (admin / admin123 — change it in Settings).');
+      'INSERT INTO users (username, password_hash, full_name, role, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run('admin', bcrypt.hashSync(password, 10), 'Admin', 'admin', mustChange, now);
+    console.log(envPw
+      ? 'First run: created admin user from CRM_ADMIN_PASSWORD.'
+      : 'First run: created admin user (admin / admin123). You MUST set a new password on first login.');
   }
 
   if (!db.prepare('SELECT id FROM message_templates LIMIT 1').get()) {

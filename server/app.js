@@ -9,9 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import https from 'node:https';
+
 import { DATA_DIR } from './db.js';
 import { SqliteSessionStore } from './lib/sessionStore.js';
-import { requireAuth } from './middleware/auth.js';
+import { requireAuth, requirePasswordChanged } from './middleware/auth.js';
 import { startBackupScheduler } from './lib/backup.js';
 import { startCloudBackupScheduler } from './lib/cloudBackup.js';
 import { ensureBootstrapped } from './bootstrap.js';
@@ -64,6 +66,18 @@ export function lanAddresses() {
   return addrs;
 }
 
+// TLS is opt-in: set CRM_TLS_CERT + CRM_TLS_KEY to PEM file paths to serve
+// HTTPS. When on, session cookies are marked Secure automatically. Default
+// stays plain HTTP for the existing LAN deployment (audit H-3).
+export function tlsConfig() {
+  const cert = process.env.CRM_TLS_CERT;
+  const key = process.env.CRM_TLS_KEY;
+  if (cert && key && fs.existsSync(cert) && fs.existsSync(key)) {
+    return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
+  }
+  return null;
+}
+
 export function createApp() {
   // Session secret: generated once, persisted — regenerating on each boot
   // would log everyone out on every restart.
@@ -71,10 +85,27 @@ export function createApp() {
   if (!fs.existsSync(secretFile)) {
     fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
   }
+  // Re-assert 0o600 on every boot: a key restored from an archive or copied
+  // under a loose umask could be group/world-readable, and this one file roots
+  // both session signing and the secret box (audit L-3).
+  try { fs.chmodSync(secretFile, 0o600); } catch { /* best effort (e.g. Windows) */ }
   const SECRET = fs.readFileSync(secretFile, 'utf8');
+  const secureCookies = process.env.CRM_SECURE_COOKIES === 'true' || !!tlsConfig();
 
   const app = express();
   app.disable('x-powered-by');
+
+  // Baseline security headers. CSP here is just the clickjacking/abuse floor
+  // that never breaks self-contained HTML pages or the SPA; a stricter
+  // script-src policy should be layered in once verified against the built
+  // client. (audit: web-security systemic theme)
+  app.use((req, res, next) => {
+    res.set('X-Frame-Options', 'DENY');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Referrer-Policy', 'no-referrer');
+    res.set('Content-Security-Policy', "frame-ancestors 'none'; object-src 'none'; base-uri 'self'");
+    next();
+  });
 
   // CORS for the mobile app: its WebView origin (http(s)://localhost) is
   // cross-origin to the LAN server. Bearer-token requests carry no cookies,
@@ -102,23 +133,22 @@ export function createApp() {
     rolling: true,
     name: 'crm.sid',
     cookie: {
-      // LAN over plain http: a Secure cookie would be silently dropped and
-      // nobody could log in. This is intentional for this deployment.
-      secure: false,
+      // Secure when TLS is configured (CRM_TLS_* or CRM_SECURE_COOKIES=true).
+      // Over plain http a Secure cookie would be silently dropped and nobody
+      // could log in, so it stays off for the default LAN deployment — but the
+      // moment TLS is terminated, cookies become Secure automatically (H-3).
+      secure: secureCookies,
       httpOnly: true,
       sameSite: 'lax',
       maxAge: 30 * 24 * 60 * 60 * 1000,
     },
   }));
 
-  // Public: lets the desktop app (and curl) identify a CallTrack server.
+  // Public: lets the desktop app (and curl) identify a CallTrack server. Kept
+  // to a liveness fingerprint only — disk-free space is no longer leaked to
+  // unauthenticated peers (audit L-8).
   app.get('/api/health', (req, res) => {
-    let diskFreeGb = null;
-    try {
-      const s = fs.statfsSync(DATA_DIR);
-      diskFreeGb = Math.round((s.bavail * s.bsize) / 1073741824);
-    } catch { /* best effort */ }
-    res.json({ app: 'calltrack-crm', version: APP_VERSION, disk_free_gb: diskFreeGb });
+    res.json({ app: 'calltrack-crm', version: APP_VERSION });
   });
 
   // Public: the mobile app checks this (possibly unpaired/revoked) to find
@@ -141,6 +171,9 @@ export function createApp() {
   // Public auth endpoints; everything else requires a session.
   app.use('/api/auth', authRoutes);
   app.use('/api', requireAuth);
+  // A still-default admin (must_change_password) is locked to the
+  // change-password endpoint until it picks a real password (audit H-1).
+  app.use('/api', requirePasswordChanged);
 
   app.use('/api/users', userRoutes);
   app.use('/api/products', productRoutes);
@@ -200,8 +233,11 @@ export function createApp() {
 export function startServer({ port = 3000 } = {}) {
   ensureBootstrapped();
   const app = createApp();
+  const tls = tlsConfig();
+  const scheme = tls ? 'https' : 'http';
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, '0.0.0.0', () => {
+    const httpServer = tls ? https.createServer(tls, app) : app;
+    const server = httpServer.listen(port, '0.0.0.0', () => {
       startBackupScheduler();
       startCloudBackupScheduler();
       startAiWorker();
@@ -218,9 +254,9 @@ export function startServer({ port = 3000 } = {}) {
         server,
         port,
         urls: {
-          local: `http://localhost:${port}`,
-          lan: lanAddresses().map((ip) => `http://${ip}:${port}`),
-          mdns: `http://${hostname}.local:${port}`,
+          local: `${scheme}://localhost:${port}`,
+          lan: lanAddresses().map((ip) => `${scheme}://${ip}:${port}`),
+          mdns: `${scheme}://${hostname}.local:${port}`,
         },
       });
     });

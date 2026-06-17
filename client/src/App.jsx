@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { api, fmtDateTime } from './api.js';
 import { isAdmin, isOwner } from './permissions.js';
 import Login from './pages/Login.jsx';
+import ForcePasswordChange from './pages/ForcePasswordChange.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Today from './pages/Today.jsx';
 import Leads from './pages/Leads.jsx';
@@ -212,6 +213,17 @@ export default function App() {
   if (!user) return <Login onLogin={setUser} />;
 
   const logout = async () => { await api.post('/api/auth/logout'); setUser(null); };
+
+  // Forced password change (audit H-1): a fresh/reset admin must rotate its
+  // password before anything else — every other endpoint 403s until it does.
+  if (user.must_change_password) {
+    return (
+      <ForcePasswordChange
+        onDone={() => setUser({ ...user, must_change_password: 0 })}
+        onLogout={logout}
+      />
+    );
+  }
 
   const markAllRead = async () => {
     try {

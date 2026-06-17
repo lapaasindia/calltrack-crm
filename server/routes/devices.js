@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { isOwner } from '../lib/permissions.js';
 import { nowUtc } from '../lib/istTime.js';
 
 const router = Router();
@@ -35,9 +36,16 @@ function lanUrls(req) {
 }
 
 router.post('/pairing-code', (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE id = ? AND is_active = 1')
+  const user = db.prepare('SELECT id, role FROM users WHERE id = ? AND is_active = 1')
     .get(Number(req.body.user_id));
   if (!user) return res.status(400).json({ error: 'Pick an active team member' });
+  // Only an owner may pair a phone to an owner-tier account. Without this a
+  // manager (also isAdmin, so the router lets them in) could mint a pairing
+  // code for a super_admin, pair their own phone, and hold an owner-tier bearer
+  // token that bypasses every requireOwner gate (audit H-8). Mirrors users.js.
+  if (isOwner(user.role) && !isOwner(req.user.role)) {
+    return res.status(403).json({ error: 'Only an owner can pair a device to an admin/super_admin account' });
+  }
   const code = makeCode();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
   db.prepare(

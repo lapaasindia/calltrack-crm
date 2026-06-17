@@ -85,6 +85,19 @@ function sourcePathFromDriveName(name) {
   return name.replace(/\.enc$/, '').replace(/__/g, '/');
 }
 
+// Resolve `rel` under `base` and refuse anything that escapes it. A Drive
+// object is named by whoever can write the backup folder, so a hostile name
+// like '..__..__etc__cron.d__x' must NOT be able to write outside the restore
+// dir (audit M-3).
+function safeJoin(base, rel) {
+  const baseAbs = path.resolve(base);
+  const dest = path.resolve(baseAbs, rel);
+  if (dest !== baseAbs && !dest.startsWith(baseAbs + path.sep)) {
+    throw new Error(`unsafe path outside restore dir: ${rel}`);
+  }
+  return dest;
+}
+
 async function cmdList() {
   const accessToken = await getAccessToken();
   const files = await listBackupFiles(accessToken);
@@ -137,9 +150,9 @@ async function cmdRestore(args) {
   let n = 0;
   for (const f of others) {
     const rel = sourcePathFromDriveName(f.name);
-    const dest = path.join(outDir, rel);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
     try {
+      const dest = safeJoin(outDir, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
       await downloadAndDecrypt(accessToken, f, tmpRoot, dest, passphrase);
       n++;
     } catch (err) {
@@ -153,7 +166,8 @@ async function cmdRestore(args) {
 }
 
 async function downloadAndDecrypt(accessToken, file, tmpRoot, destAbs, passphrase) {
-  const tmpEnc = path.join(tmpRoot, file.name);
+  // Basename only — the raw Drive name must not steer the temp path either.
+  const tmpEnc = path.join(tmpRoot, path.basename(file.name));
   await drive.downloadFile(accessToken, file.id, tmpEnc);
   try {
     decryptFile(tmpEnc, destAbs, passphrase);

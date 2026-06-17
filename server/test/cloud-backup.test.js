@@ -279,9 +279,9 @@ test('backup routes: status, passphrase set+verify, connect gating', async () =>
     // Owner-only: a non-owner session is forbidden. Create a caller + log in.
     await apiCall('/api/users', {
       method: 'POST', cookie,
-      body: { username: 'caller1', full_name: 'Caller One', password: 'pass123', role: 'caller' },
+      body: { username: 'caller1', full_name: 'Caller One', password: 'pass1234', role: 'caller' },
     });
-    const callerLogin = await apiCall('/api/auth/login', { method: 'POST', body: { username: 'caller1', password: 'pass123' } });
+    const callerLogin = await apiCall('/api/auth/login', { method: 'POST', body: { username: 'caller1', password: 'pass1234' } });
     const callerCookie = callerLogin.headers.get('set-cookie').split(';')[0];
     const forbidden = await apiCall('/api/backup/status', { cookie: callerCookie });
     assert.equal(forbidden.status, 403, 'cloud backup is owner-only');

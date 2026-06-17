@@ -21,7 +21,11 @@ function sendMaybeCsv(req, res, rows, filename) {
   if (!list.length) return res.status(200).type('text/csv').send('');
   const cols = Object.keys(list[0]);
   const esc = (v) => {
-    const s = v === null || v === undefined ? '' : String(v);
+    let s = v === null || v === undefined ? '' : String(v);
+    // Spreadsheet formula-injection guard (audit M-7): a cell beginning with
+    // = + - @ TAB or CR is evaluated as a formula by Excel/Sheets. Prefix a
+    // single quote so it's rendered as literal text. Then apply CSV quoting.
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = ['﻿' + cols.join(','), ...list.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');

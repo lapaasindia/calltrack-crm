@@ -5,6 +5,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { logAudit } from '../lib/audit.js';
 import { ROLES, isOwner } from '../lib/permissions.js';
+import { passwordPolicyError } from './auth.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -32,7 +33,8 @@ router.post('/', (req, res) => {
   const role = ROLES.includes(req.body.role) ? req.body.role : 'caller';
   const department = req.body.department ? String(req.body.department).trim().slice(0, 80) : null;
   if (!username || !full_name) return res.status(400).json({ error: 'Username and full name required' });
-  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  const pwError = passwordPolicyError(password, username);
+  if (pwError) return res.status(400).json({ error: pwError });
   // Only an owner (super_admin/admin) may mint an owner-tier account. Without
   // this a manager (also isAdmin) could create a super_admin and log into it,
   // escalating past every requireOwner gate.
@@ -105,8 +107,11 @@ router.patch('/:id', (req, res) => {
   }
   if (req.body.new_password !== undefined) {
     const pw = String(req.body.new_password);
-    if (pw.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+    const pwError = passwordPolicyError(pw, user.username);
+    if (pwError) return res.status(400).json({ error: pwError });
+    // An admin-set password is temporary — force the user to pick their own on
+    // next login (audit H-1, defense in depth for reset accounts).
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?')
       .run(bcrypt.hashSync(pw, 10), user.id);
     changed.push('password');
   }

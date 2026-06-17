@@ -43,6 +43,24 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+// Audio is streamed with a short-lived, single-recording media ticket (audit
+// M-2/L-1) — NOT the long-lived device token, which would persist in the
+// WebView's <audio> URL history. We render the player src-less and hydrate it
+// after mount: fetch a ticket via api() (Authorization header, never in a URL)
+// then set the src as ?ticket=.
+const audioTag = (recId) =>
+  `<audio controls preload="none" style="width:100%;height:36px;margin-bottom:8px" data-rec="${recId}"></audio>`;
+
+async function hydrateAudio(root) {
+  for (const el of root.querySelectorAll('audio[data-rec]')) {
+    const id = el.dataset.rec;
+    try {
+      const { ticket } = await api(`/api/review/audio/${id}/ticket`, { method: 'POST' });
+      el.src = `${cfg.serverUrl}/api/review/audio/${id}?ticket=${encodeURIComponent(ticket)}#t=0`;
+    } catch { /* leave the player empty; the rest of the row still works */ }
+  }
+}
+
 const fmtDur = (s) => (s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s || 0}s`);
 const fmtTime = (ms) => new Date(ms).toLocaleString('en-IN', {
   timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
@@ -271,7 +289,7 @@ async function renderHome() {
   const st = data.stats;
   app.querySelector('.content').innerHTML = `
     <div class="card">
-      <h2>Today · ${cfg.userName.split(' ')[0]}</h2>
+      <h2>Today · ${escapeHtml(cfg.userName.split(' ')[0])}</h2>
       <div style="display:flex;gap:16px">
         <div><div class="muted">Calls</div><div style="font-size:24px;font-weight:800">${st.calls}${st.target ? `<span class="muted" style="font-size:14px">/${st.target.calls_target}</span>` : ''}</div></div>
         <div><div class="muted">Connects</div><div style="font-size:24px;font-weight:800">${st.connects}</div></div>
@@ -279,11 +297,11 @@ async function renderHome() {
       </div>
     </div>
     ${section('📞 Follow-ups', fu.map((f) => queueRow(f.name, f.phone,
-      `${overdue(f.due_at) ? '<span class="badge over">overdue</span> ' : ''}${f.reason || ''}`)).join('') || emptyRow('No follow-ups due'))}
+      `${overdue(f.due_at) ? '<span class="badge over">overdue</span> ' : ''}${escapeHtml(f.reason || '')}`)).join('') || emptyRow('No follow-ups due'))}
     ${section('✅ Tasks', tasks.map((t) => queueRow(t.title, t.lead_phone,
-      `${t.due_date < todayIst() ? '<span class="badge over">overdue</span> ' : ''}${t.lead_name || ''}${t.source === 'ai' ? ' <span class="badge ai">AI</span>' : ''}`)).join('') || emptyRow('No tasks'))}
+      `${t.due_date < todayIst() ? '<span class="badge over">overdue</span> ' : ''}${escapeHtml(t.lead_name || '')}${t.source === 'ai' ? ' <span class="badge ai">AI</span>' : ''}`)).join('') || emptyRow('No tasks'))}
     ${section('💰 Payments due', pay.map((p) => queueRow(p.name, p.phone,
-      `₹${Math.round((p.amount_paise - p.paid_paise) / 100).toLocaleString('en-IN')} · ${p.product_name}`)).join('') || emptyRow('Nothing due'))}`;
+      `₹${Math.round((p.amount_paise - p.paid_paise) / 100).toLocaleString('en-IN')} · ${escapeHtml(p.product_name)}`)).join('') || emptyRow('Nothing due'))}`;
   bindCalls();
 }
 
@@ -298,20 +316,20 @@ async function renderReview() {
     ${section(`📲 New numbers (${captured.length})`, captured.map((c) => `
       <div class="row">
         <div class="info">
-          <div class="name">${c.phone} ${c.recording_count ? '<span class="badge rec">🎙</span>' : ''}</div>
-          <div class="meta">${c.direction} · ${fmtDur(c.duration_seconds)} · ${fmtTime(c.call_log_ts)}</div>
+          <div class="name">${escapeHtml(c.phone)} ${c.recording_count ? '<span class="badge rec">🎙</span>' : ''}</div>
+          <div class="meta">${escapeHtml(c.direction)} · ${fmtDur(c.duration_seconds)} · ${fmtTime(c.call_log_ts)}</div>
         </div>
       </div>
       <div class="btn-row" style="margin:-4px 0 10px">
-        <button class="btn sm green" data-lead="${c.id}" data-phone="${c.phone}">+ Lead</button>
+        <button class="btn sm green" data-lead="${c.id}" data-phone="${escapeHtml(c.phone)}">+ Lead</button>
         <button class="btn sm ghost" data-ignore="${c.id}">Ignore</button>
         <button class="btn sm ghost" data-never="${c.id}">Never</button>
       </div>`).join('') || emptyRow('No new numbers'))}
     ${section(`✍️ What happened? (${untagged.length})`, untagged.map((c) => `
       <div class="card" style="margin-bottom:9px">
-        <div class="name" style="font-weight:700">${c.name}</div>
+        <div class="name" style="font-weight:700">${escapeHtml(c.name)}</div>
         <div class="meta" style="color:var(--ink-soft);font-size:12.5px;margin:3px 0 9px">${fmtDur(c.duration_seconds)} · ${fmtTime(Date.parse(c.called_at))}</div>
-        ${c.recording_id ? `<audio controls preload="none" style="width:100%;height:36px;margin-bottom:8px" src="${cfg.serverUrl}/api/review/audio/${c.recording_id}?token=${encodeURIComponent(cfg.token)}#t=0"></audio>` : ''}
+        ${c.recording_id ? audioTag(c.recording_id) : ''}
         <div class="btn-row">
           ${['interested|😊 Interested', 'not_interested|🙅 Not', 'callback_requested|📞 Callback'].map((o) => {
             const [v, l] = o.split('|');
@@ -319,6 +337,8 @@ async function renderReview() {
           }).join('')}
         </div>
       </div>`).join('') || emptyRow('Nothing to tag'))}`;
+
+  hydrateAudio(app.querySelector('.content'));
 
   app.querySelectorAll('[data-lead]').forEach((b) => b.onclick = async () => {
     const name = prompt(`Name for ${b.dataset.phone}?`, '');
@@ -345,8 +365,8 @@ async function renderSettings() {
     <div class="card">
       <h2>This phone</h2>
       <div class="row" style="background:var(--surface2)">
-        <div class="info"><div class="name">${cfg.userName}</div>
-          <div class="meta">${cfg.serverUrl}</div></div>
+        <div class="info"><div class="name">${escapeHtml(cfg.userName)}</div>
+          <div class="meta">${escapeHtml(cfg.serverUrl)}</div></div>
       </div>
       <div class="muted" style="margin-top:6px">Last sync: ${s.lastSyncMs ? fmtTime(s.lastSyncMs) : 'never'} · ${s.pendingUploads || 0} waiting to upload</div>
     </div>
@@ -375,15 +395,25 @@ const overdue = (iso) => {
   return d < todayIst();
 };
 function queueRow(name, phone, meta) {
+  // `name` is always plain text (lead/task/product name) — escape it (audit H-4).
+  // `meta` is caller-built HTML (badges + already-escaped user text), so it is
+  // intentionally NOT escaped here; callers must escape any user values they
+  // interpolate into it. `phone` is digits only.
+  const tel = String(phone || '').replace(/[^\d+]/g, '');
   return `<div class="row">
-    <div class="info"><div class="name">${name}</div><div class="meta">${meta}</div></div>
-    ${phone ? `<a class="act call" href="tel:+91${phone}">📞</a>` : ''}
+    <div class="info"><div class="name">${escapeHtml(name)}</div><div class="meta">${meta}</div></div>
+    ${tel ? `<a class="act call" href="tel:+91${tel}">📞</a>` : ''}
   </div>`;
 }
 function bindCalls() { /* tel: links handled natively by the anchor */ }
 function renderError(msg) {
-  app.querySelector('.content').innerHTML = `<div class="empty"><div class="big">📡</div>${msg}<br><br>
-    <button class="btn ghost sm" onclick="location.reload()" style="width:auto;margin:0 auto">Retry</button></div>`;
+  const content = app.querySelector('.content');
+  // Listener bound in JS (not an inline onclick) so a strict CSP with no
+  // 'unsafe-inline' script-src can be enforced in index.html (audit H-4).
+  content.innerHTML = `<div class="empty"><div class="big">📡</div>${escapeHtml(msg)}<br><br>
+    <button class="btn ghost sm" id="retry-btn" style="width:auto;margin:0 auto">Retry</button></div>`;
+  const btn = content.querySelector('#retry-btn');
+  if (btn) btn.onclick = () => location.reload();
 }
 
 // ===================== WHATSAPP INBOX =====================
@@ -403,7 +433,7 @@ async function renderWhatsApp() {
   c.innerHTML = contacts.map((ct) => {
     const title = ct.lead_name || ct.display_name || fmtPhoneIn(ct.phone) || ct.wa_jid;
     const last = (ct.last_direction === 'outgoing' ? '↩ ' : '') + (ct.last_body || '—');
-    const tag = ct.lead_id ? `<span class="badge">${ct.lead_name || 'lead'}</span>` : '<span class="badge muted">not a lead</span>';
+    const tag = ct.lead_id ? `<span class="badge">${escapeHtml(ct.lead_name || 'lead')}</span>` : '<span class="badge muted">not a lead</span>';
     return `<button class="wa-conv-row" data-id="${ct.id}">
       <div class="wa-conv-title">${escapeHtml(title)} ${tag}</div>
       <div class="wa-conv-sub">${escapeHtml(last)}</div>

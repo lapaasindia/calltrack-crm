@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAdmin, loadLead, canAccessLead } from '../middleware/auth.js';
+import { isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
@@ -9,7 +10,17 @@ const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const METHODS = ['upi', 'cash', 'bank_transfer', 'card', 'cheque', 'other'];
 
-const toPaise = (rupees) => Math.round(Number(rupees) * 100);
+// ₹10 crore per record is far above any real deal/payment, and well under
+// Number.MAX_SAFE_INTEGER paise — past which JS integer math silently loses
+// precision and poisons SUM() rollups (audit M-6).
+const MAX_PAISE = 100_00_00_000 * 100; // 10 crore rupees, in paise
+// Convert rupees → integer paise. Returns NaN for non-finite/out-of-range
+// input so the existing `Number.isFinite(value) && value > 0` guards reject it.
+const toPaise = (rupees) => {
+  const paise = Math.round(Number(rupees) * 100);
+  if (!Number.isSafeInteger(paise) || paise < 0 || paise > MAX_PAISE) return NaN;
+  return paise;
+};
 
 function loadDealChecked(req, res) {
   const deal = db.prepare('SELECT * FROM deals WHERE id = ?').get(req.params.id);
@@ -205,8 +216,18 @@ router.put('/deals/:id/installments', (req, res) => {
 // Collections overview: every active deal with balances + overdue installments.
 router.get('/collections', (req, res) => {
   const today = todayIst();
-  const callerScope = req.user.role === 'caller' ? 'AND l.assigned_to = ?' : '';
-  const params = req.user.role === 'caller' ? [req.user.id] : [];
+  // Scope non-admin roles to their own deals (audit H-7 — was `role==='caller'`,
+  // which leaked all deals/balances/phones to agent/employee/read_only).
+  let callerScope = '';
+  const params = [];
+  if (!canSeeAllLeads(req.user.role)) {
+    if (isReadOnly(req.user.role)) {
+      callerScope = 'AND 1 = 0';
+    } else {
+      callerScope = 'AND l.assigned_to = ?';
+      params.push(req.user.id);
+    }
+  }
 
   const deals = db.prepare(
     `SELECT d.id, d.deal_value_paise, d.status, d.won_date, pr.name AS product_name,

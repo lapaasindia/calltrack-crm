@@ -45,6 +45,19 @@ async function isCallTrack(url) {
   } catch { return false; }
 }
 
+// Only hand SAFE schemes to the OS shell. Renderer content (which over plain
+// http join mode could be MITM'd, or could carry a user-set meeting_url) must
+// never be able to launch file:, smb:/UNC, or custom protocols like ms-msdt:
+// that turn a link into native execution (audit H-5).
+const SAFE_EXTERNAL_SCHEME = /^(https?|mailto|tel):/i;
+function safeOpenExternal(target) {
+  if (SAFE_EXTERNAL_SCHEME.test(String(target || ''))) {
+    shell.openExternal(target).catch(() => {});
+  } else {
+    console.warn('[calltrack] blocked unsafe external URL:', target);
+  }
+}
+
 function createMainWindow(url) {
   mainWindow = new BrowserWindow({
     width: 1240,
@@ -53,13 +66,14 @@ function createMainWindow(url) {
     minHeight: 600,
     title: 'CallTrack CRM',
     backgroundColor: '#1a1f36',
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   mainWindow.loadURL(url);
 
-  // External links (wa.me, tel:) must open outside the app window.
+  // External links (wa.me, tel:) must open outside the app window — but only
+  // safe schemes (audit H-5).
   mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
-    shell.openExternal(target);
+    safeOpenExternal(target);
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (e, target) => {
@@ -67,7 +81,7 @@ function createMainWindow(url) {
       const cfg = readConfig();
       if (cfg?.mode !== 'join' || !target.startsWith(cfg.serverUrl)) {
         e.preventDefault();
-        shell.openExternal(target);
+        safeOpenExternal(target);
       }
     }
   });

@@ -131,8 +131,13 @@ router.post('/', (req, res) => {
   }
   let projectId = null;
   if (req.body.project_id) {
-    const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(Number(req.body.project_id));
+    const project = db.prepare('SELECT id, assigned_head_id FROM projects WHERE id = ?').get(Number(req.body.project_id));
     if (!project) return res.status(400).json({ error: 'Invalid project' });
+    // Non-admins may only attach tasks to a project they head — otherwise an
+    // agent could link tasks into any project and skew its metrics (audit L-2).
+    if (!isAdmin(req.user.role) && project.assigned_head_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not your project' });
+    }
     projectId = project.id;
   }
   const priority = PRIORITIES.includes(req.body.priority) ? req.body.priority : 'Medium';
@@ -179,8 +184,11 @@ router.patch('/:id', (req, res) => {
     if (body.project_id === null || body.project_id === '') {
       projectId = null;
     } else {
-      const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(Number(body.project_id));
+      const project = db.prepare('SELECT id, assigned_head_id FROM projects WHERE id = ?').get(Number(body.project_id));
       if (!project) return res.status(400).json({ error: 'Invalid project' });
+      if (!isAdmin(req.user.role) && project.assigned_head_id !== req.user.id) {
+        return res.status(403).json({ error: 'Not your project' });
+      }
       projectId = project.id;
     }
   }

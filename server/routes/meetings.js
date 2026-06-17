@@ -18,6 +18,15 @@ import { isAdmin } from '../lib/permissions.js';
 
 const router = Router();
 const STATUSES = ['Scheduled', 'In Progress', 'Completed', 'Cancelled'];
+
+// Only persist http(s) meeting URLs. A file:/smb:/custom-scheme value could be
+// turned into native execution when an operator clicks the Join link in the
+// Electron desktop app's shell.openExternal (audit H-5).
+function safeMeetingUrl(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  return /^https?:\/\//i.test(s) ? s : null;
+}
 const ITEM_STATUSES = ['Pending', 'In Progress', 'Done'];
 const DECISION_STATUSES = ['Pending', 'Accepted', 'Revisit'];
 const TIMER_STATUSES = ['Running', 'Paused', 'Stopped'];
@@ -200,7 +209,7 @@ router.post('/', (req, res) => {
     body.description ? String(body.description) : null,
     startAt, endAt,
     body.location ? String(body.location) : null,
-    body.meeting_url ? String(body.meeting_url) : null,
+    safeMeetingUrl(body.meeting_url),
     body.notes ? String(body.notes) : null,
     ownerId, JSON.stringify(attendeeIds), leadId, dealId, projectId,
     req.user.id, nowUtc(),
@@ -293,7 +302,7 @@ router.patch('/:id', (req, res) => {
     body.description !== undefined ? (body.description ? String(body.description) : null) : meeting.description,
     startAt, endAt,
     body.location !== undefined ? (body.location ? String(body.location) : null) : meeting.location,
-    body.meeting_url !== undefined ? (body.meeting_url ? String(body.meeting_url) : null) : meeting.meeting_url,
+    body.meeting_url !== undefined ? safeMeetingUrl(body.meeting_url) : meeting.meeting_url,
     status,
     body.notes !== undefined ? (body.notes ? String(body.notes) : null) : meeting.notes,
     ownerId, attendeeJson, leadId, dealId, projectId,

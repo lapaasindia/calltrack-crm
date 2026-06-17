@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- Content-Security-Policy (audit H-4): no inline or remote scripts, so an
+       injected lead/task name can't execute even if escaping is ever missed.
+       'unsafe-inline' is allowed for STYLE only (the UI uses inline style attrs);
+       http:/https: in connect/media let the app reach the LAN server. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' http: https:; connect-src 'self' http: https:; font-src 'self' data:; object-src 'none'; base-uri 'self'" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>CallTrack</title>
   <link rel="stylesheet" href="style.css" />

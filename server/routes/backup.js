@@ -136,18 +136,25 @@ router.get('/google/callback', async (req, res) => {
 // held in process memory so the scheduler can run unattended until restart.
 router.post('/passphrase', (req, res) => {
   const passphrase = String(req.body.passphrase || '');
-  if (passphrase.length < 8) {
-    return res.status(400).json({ error: 'Passphrase must be at least 8 characters' });
-  }
+  if (!passphrase) return res.status(400).json({ error: 'Passphrase required' });
   const existing = getSetting('cloud_backup_passphrase', null);
   if (existing && existing.salt && existing.verifier) {
     // Already set: verify it matches (so we don't silently change the key under
     // a pile of already-encrypted Drive backups that the old passphrase opens).
+    // No length policy here — it must accept whatever was set previously.
     if (!verifierMatches(passphrase, existing.salt, existing.verifier)) {
       return res.status(400).json({ error: 'Passphrase does not match the one already set' });
     }
     setInMemoryPassphrase(passphrase);
     return res.json({ ok: true, verified: true });
+  }
+  // Setting a NEW passphrase: this single secret protects ALL off-site backups
+  // against an offline attack, so require real strength (audit M-5).
+  if (passphrase.length < 12) {
+    return res.status(400).json({ error: 'Backup passphrase must be at least 12 characters (it is the only thing protecting your off-site backups)' });
+  }
+  if (/^(.)\1*$/.test(passphrase) || /^(?:password|passphrase|backup|calltrack)/i.test(passphrase)) {
+    return res.status(400).json({ error: 'That passphrase is too weak — use a longer, unpredictable phrase' });
   }
   const salt = newSaltHex();
   const verifier = deriveVerifier(passphrase, salt);

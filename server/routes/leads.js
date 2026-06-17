@@ -5,7 +5,7 @@ import { normalizePhone } from '../lib/phone.js';
 import { nowUtc } from '../lib/istTime.js';
 import { STAGES, changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
-import { isAdmin } from '../lib/permissions.js';
+import { isAdmin, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { getAutoAssignedOwner } from '../lib/assignment.js';
 
 const router = Router();
@@ -21,14 +21,23 @@ const LEAD_COLS = `l.id, l.name, l.phone, l.alt_phone, l.email, l.city, l.source
   l.lost_reason, l.assigned_to, l.notes, l.score, l.ai_intent, l.created_at, l.updated_at,
   u.full_name AS assigned_to_name`;
 
-// List with filters. Callers are hard-scoped to their own leads at the SQL level.
+// List with filters. Non-admin roles are hard-scoped to their own leads at the
+// SQL level. IMPORTANT: this used to test `role === 'caller'` literally, which
+// let agent/employee/read_only fall through and read EVERY lead (audit H-7).
+// Scope by the central permission helpers instead.
 router.get('/', (req, res) => {
   const where = ['l.deleted_at IS NULL'];
   const params = [];
 
-  if (req.user.role === 'caller') {
-    where.push('l.assigned_to = ?');
-    params.push(req.user.id);
+  if (!canSeeAllLeads(req.user.role)) {
+    if (isReadOnly(req.user.role)) {
+      // read_only has no row-level lead access (matches canAccessLead).
+      where.push('1 = 0');
+    } else {
+      // agent / caller / employee: only their own assigned leads.
+      where.push('l.assigned_to = ?');
+      params.push(req.user.id);
+    }
   } else if (req.query.assigned_to === 'none') {
     where.push('l.assigned_to IS NULL');
   } else if (req.query.assigned_to) {

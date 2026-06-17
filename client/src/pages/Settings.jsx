@@ -168,7 +168,7 @@ function UserModal({ user: editing, onClose, onSaved }) {
         </div>
         <div className="field">
           <label>{isNew ? 'Password' : 'New password (leave blank to keep)'}</label>
-          <input value={form.password} onChange={set('password')} placeholder="min 6 characters" />
+          <input value={form.password} onChange={set('password')} placeholder="min 8 characters" />
         </div>
         <div className="field">
           <label>Role{isSelf && ' (you can’t change your own)'}</label>
@@ -193,7 +193,7 @@ function UserModal({ user: editing, onClose, onSaved }) {
       <div className="modal-actions">
         <button className="btn secondary" onClick={onClose}>Cancel</button>
         <button className="btn" onClick={save}
-          disabled={!form.full_name || (isNew && (!form.username || form.password.length < 6))}>Save</button>
+          disabled={!form.full_name || (isNew && (!form.username || form.password.length < 8))}>Save</button>
       </div>
     </Modal>
   );

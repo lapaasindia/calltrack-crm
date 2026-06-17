@@ -24,9 +24,14 @@ const TERMINAL_STATUSES = ['paid', 'cancelled'];
 // Negative is ALLOWED at the line level so a discount can be expressed as a
 // negative line (e.g. a billing-term discount from the price builder); the
 // computed subtotal is still guarded to be non-negative.
+// ±10 crore rupees per line — far above any real invoice line, and small
+// enough that summed totals stay well inside Number.MAX_SAFE_INTEGER paise so
+// integer math never silently loses precision (audit M-6).
+const MAX_LINE_PAISE = 100_00_00_000 * 100;
 function toLinePaise(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  if (Math.abs(n) > MAX_LINE_PAISE) return null;
   return n;
 }
 
@@ -110,14 +115,21 @@ router.post('/', (req, res) => {
     const description = String(it.description ?? it.name ?? '').trim();
     if (!description) return res.status(400).json({ error: `Item ${i + 1}: description required` });
     const qty = Number(it.qty);
+    if (Number.isInteger(qty) && qty > 100000) {
+      return res.status(400).json({ error: `Item ${i + 1}: quantity is too large` });
+    }
     const cleanQty = Number.isInteger(qty) && qty > 0 ? qty : 1;
     const unit = toLinePaise(it.unit_price_paise ?? it.unit_paise);
-    if (unit === null) return res.status(400).json({ error: `Item ${i + 1}: unit_price_paise must be an integer (paise)` });
+    if (unit === null) return res.status(400).json({ error: `Item ${i + 1}: unit_price_paise must be an integer (paise) within range` });
+    const amount = cleanQty * unit;
+    if (Math.abs(amount) > MAX_LINE_PAISE) {
+      return res.status(400).json({ error: `Item ${i + 1}: line amount is out of range` });
+    }
     items.push({
       description,
       qty: cleanQty,
       unit_price_paise: unit,
-      amount_paise: cleanQty * unit,
+      amount_paise: amount,
       sort_order: i,
     });
   }
@@ -128,6 +140,9 @@ router.post('/', (req, res) => {
   const gstPercent = resolveGstPercent(body);
   const tax = Math.round((subtotal * gstPercent) / 100);
   const total = subtotal + tax;
+  if (!Number.isSafeInteger(total)) {
+    return res.status(400).json({ error: 'Invoice total is out of range' });
+  }
 
   const issueDate = todayIst();
   const dueDate = DATE_RE.test(body.due_date || '') ? body.due_date : addDays(issueDate, 14);

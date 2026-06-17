@@ -45,16 +45,16 @@ before(async () => {
 
   const alice = await api('/api/users', {
     method: 'POST', cookie: adminCookie,
-    body: { username: 'alice_m', full_name: 'Alice Caller', password: 'secret9', role: 'caller' },
+    body: { username: 'alice_m', full_name: 'Alice Caller', password: 'secret99', role: 'caller' },
   });
   aliceId = alice.data.id;
   const bob = await api('/api/users', {
     method: 'POST', cookie: adminCookie,
-    body: { username: 'bob_m', full_name: 'Bob Caller', password: 'secret9', role: 'caller' },
+    body: { username: 'bob_m', full_name: 'Bob Caller', password: 'secret99', role: 'caller' },
   });
   bobId = bob.data.id;
-  aliceCookie = await loginCookie('alice_m', 'secret9');
-  bobCookie = await loginCookie('bob_m', 'secret9');
+  aliceCookie = await loginCookie('alice_m', 'secret99');
+  bobCookie = await loginCookie('bob_m', 'secret99');
 });
 
 after(() => {

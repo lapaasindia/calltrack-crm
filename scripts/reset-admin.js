@@ -23,7 +23,7 @@ const db = new Database(DB_PATH);
 db.pragma('busy_timeout = 5000');
 const hash = bcrypt.hashSync(newPassword, 10);
 const info = db
-  .prepare('UPDATE users SET password_hash = ? WHERE username = ? COLLATE NOCASE')
+  .prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE username = ? COLLATE NOCASE')
   .run(hash, username);
 db.close();
 

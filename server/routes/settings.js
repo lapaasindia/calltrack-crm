@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db, { getSetting, setSetting } from '../db.js';
 import { requireAdmin, requireOwner } from '../middleware/auth.js';
 import { runBackup } from '../lib/backup.js';
+import { sealSecret } from '../lib/secretBox.js';
 
 const router = Router();
 
@@ -29,9 +30,11 @@ router.put('/', requireOwner, (req, res) => {
   if (req.body.ai_cloud_enabled !== undefined) {
     setSetting('ai_cloud_enabled', !!req.body.ai_cloud_enabled);
   }
-  // Empty string clears the key; any non-empty value sets it. Never returned.
+  // Empty string clears the key; any non-empty value is sealed at rest (audit
+  // M-4) so it never sits in plaintext in crm.sqlite or its backups. Never returned.
   if (req.body.sarvam_api_key !== undefined) {
-    setSetting('sarvam_api_key', String(req.body.sarvam_api_key).trim());
+    const key = String(req.body.sarvam_api_key).trim();
+    setSetting('sarvam_api_key', key ? sealSecret(key) : '');
   }
   if (req.body.company_legal_name !== undefined) {
     setSetting('company_legal_name', String(req.body.company_legal_name).trim());

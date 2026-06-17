@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import db, { getSetting, setSetting } from '../db.js';
 import { requireAdmin, canAccessLead } from '../middleware/auth.js';
-import { isOwner } from '../lib/permissions.js';
+import { isOwner, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
+import { openSecret } from '../lib/secretBox.js';
 import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 import { aiStatus, runAiQueueOnce, analyzeRecordingTranscript } from '../lib/ai.js';
@@ -10,6 +11,18 @@ import { RECORDINGS_BASE } from './sync.js';
 import path from 'node:path';
 
 const router = Router();
+
+// Read the Sarvam key, transparently unsealing a sealed value (audit M-4) while
+// still accepting a legacy plaintext key from installs predating the sealing.
+const SEALED_RE = /^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/i;
+export function readSarvamKey() {
+  const raw = getSetting('sarvam_api_key', '');
+  if (!raw) return '';
+  if (SEALED_RE.test(raw)) {
+    try { return openSecret(raw); } catch { return ''; }
+  }
+  return raw;
+}
 
 router.get('/status', (req, res) => {
   const pending = db.prepare("SELECT COUNT(*) n FROM recordings WHERE ai_status = 'pending'").get().n;
@@ -29,7 +42,16 @@ router.get('/suggestions', (req, res) => {
   const where = ["s.status = 'pending'"];
   const params = [];
   if (req.query.lead_id) { where.push('s.lead_id = ?'); params.push(Number(req.query.lead_id)); }
-  if (req.user.role === 'caller') { where.push('l.assigned_to = ?'); params.push(req.user.id); }
+  // Scope non-admin roles to their own leads' suggestions (audit H-7 — was
+  // `role==='caller'`, which leaked all pending suggestions to agent/employee).
+  if (!canSeeAllLeads(req.user.role)) {
+    if (isReadOnly(req.user.role)) {
+      where.push('1 = 0');
+    } else {
+      where.push('l.assigned_to = ?');
+      params.push(req.user.id);
+    }
+  }
   const rows = db.prepare(
     `SELECT s.*, r.summary FROM ai_suggestions s
      LEFT JOIN leads l ON l.id = s.lead_id
@@ -112,7 +134,7 @@ export function recordingsRouter({
     if (!getSetting('ai_cloud_enabled', false)) {
       return res.status(400).json({ error: 'Cloud AI is disabled. Enable it in Settings first.' });
     }
-    const apiKey = getSetting('sarvam_api_key', '');
+    const apiKey = readSarvamKey();
     if (!apiKey) {
       return res.status(400).json({ error: 'No Sarvam API key configured.' });
     }
