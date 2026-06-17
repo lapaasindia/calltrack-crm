@@ -5,6 +5,61 @@ import { useApp } from '../App.jsx';
 import { Modal, invalidateTemplateCache } from '../components.jsx';
 import { ROLES, ROLE_LABELS, isOwner } from '../permissions.js';
 
+// In-app step-by-step setup guides, opened from a "Guide" link on the cards.
+const SETUP_GUIDES = {
+  drive: {
+    title: '☁️ Google Drive backup — setup guide',
+    intro: 'Do all of this on the office computer at http://localhost:3000 — Google only accepts "localhost" for this, not the 192.168 address. About 5–10 minutes, one time.',
+    steps: [
+      { t: 'Open the Google Cloud console', d: `Go to console.cloud.google.com and sign in with the Google account whose Drive should hold the backups.` },
+      { t: 'Create a project', d: `Top bar, open the project dropdown, click New Project, name it "CallTrack Backup", click Create, and make sure it stays selected.` },
+      { t: 'Enable the Drive API', d: `Left menu, APIs & Services, Library. Search "Google Drive API" and click Enable.` },
+      { t: 'Set up the consent screen', d: `APIs & Services, OAuth consent screen. Choose External, Create. App name "CallTrack", put your email in both email fields, then Save and Continue through each step. On "Test users", click Add Users and add your Gmail, then Save.` },
+      { t: 'Create the Desktop client', d: `APIs & Services, Credentials, Create Credentials, OAuth client ID. Application type: Desktop app, Create. Copy the Client ID and Client secret.` },
+      { t: 'Paste them here', d: `Back on this page, paste the Client ID and Client secret into the fields above, then click "Save Google credentials".` },
+      { t: 'Connect', d: `Click "Connect Google Drive" and pick your account. If you see "Google hasn't verified this app" (it is your own app), click Advanced, then Continue, then Allow.` },
+      { t: 'Set a passphrase', d: `Choose a Backup passphrase and WRITE IT DOWN somewhere safe. If you lose it the encrypted backups cannot be recovered — there is no reset.` },
+      { t: 'Test it', d: `Click "Back up now". A "CallTrack Backups" folder appears in your Google Drive as unreadable encrypted files. After this, daily backups run automatically.` },
+    ],
+  },
+  whatsapp: {
+    title: '💬 WhatsApp inbox — setup guide',
+    intro: 'Two-way WhatsApp inside CallTrack: incoming chats link to leads automatically and you reply from the CRM. Use a DEDICATED business number — this is the unofficial WhatsApp Web protocol and a personal number risks a ban.',
+    steps: [
+      { t: 'Install the engine (office computer only)', d: `In the project folder on the office Mac, run this once. It installs the WhatsApp engine on this machine only — it is deliberately not part of the normal install, so no one else can run it.`, cmd: 'npm run whatsapp:install' },
+      { t: 'Restart the server', d: `So it picks up the engine, restart the CallTrack server:`, cmd: 'launchctl kickstart -k gui/$(id -u)/com.calltrack.crm' },
+      { t: 'Use a dedicated business number', d: `Put a dedicated business WhatsApp number on a phone that is on the office WiFi. Never a personal number.` },
+      { t: 'Connect', d: `Back on this page, click Connect — a QR code appears.` },
+      { t: 'Scan it', d: `On the business phone: WhatsApp, Settings, Linked devices, Link a device, then scan the QR.` },
+      { t: 'Done', d: `Status turns "connected" and a WhatsApp item appears in the sidebar. Incoming messages link to leads, show in the timeline, and you can reply. Phone notifications need the Android app rebuild (docs/WHATSAPP-MOBILE.md).` },
+    ],
+  },
+};
+
+function SetupGuideModal({ kind, onClose }) {
+  const g = SETUP_GUIDES[kind];
+  if (!g) return null;
+  return (
+    <Modal title={g.title} onClose={onClose}>
+      <p style={{ color: 'var(--ink-soft)', marginTop: 0 }}>{g.intro}</p>
+      <ol style={{ paddingLeft: 18, lineHeight: 1.5, margin: '8px 0' }}>
+        {g.steps.map((s, i) => (
+          <li key={i} style={{ marginBottom: 12 }}>
+            <b>{s.t}</b>
+            <div style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 2 }}>{s.d}</div>
+            {s.cmd && (
+              <code style={{ display: 'inline-block', marginTop: 4, padding: '3px 8px', background: 'var(--brand-soft)', color: 'var(--brand-dark)', borderRadius: 6, fontSize: 12.5 }}>{s.cmd}</code>
+            )}
+          </li>
+        ))}
+      </ol>
+      <div style={{ textAlign: 'right', marginTop: 6 }}>
+        <button className="btn" onClick={onClose}>Got it</button>
+      </div>
+    </Modal>
+  );
+}
+
 function PairDeviceModal({ users, onClose }) {
   const { showToast } = useApp();
   const [userId, setUserId] = useState('');
@@ -322,6 +377,7 @@ export default function Settings() {
   const [catalog, setCatalog] = useState({ services: [], addons: [], pricing_config: null });
   const [pricingForm, setPricingForm] = useState(null);
   const [wa, setWa] = useState(null); // WhatsApp session status
+  const [guide, setGuide] = useState(null); // 'drive' | 'whatsapp' — in-app setup guide
   const [modal, setModal] = useState(null);
 
   const loadCatalog = () => api.get('/api/catalog').then((c) => {
@@ -900,7 +956,10 @@ export default function Settings() {
 
       {isOwner(user.role) && (
       <div className="card">
-        <h2>💬 WhatsApp inbox (Baileys)</h2>
+        <h2>💬 WhatsApp inbox (Baileys){' '}
+          <a href="#guide" onClick={(e) => { e.preventDefault(); setGuide('whatsapp'); }}
+            style={{ fontSize: 14, fontWeight: 600 }}>📖 Guide</a>
+        </h2>
         <p style={{ color: 'var(--ink-soft)', marginTop: 0 }}>
           Two-way WhatsApp chat, embedded in this server. Incoming messages link to leads by phone
           and appear in the lead timeline. <b>Use a dedicated business number</b> — this is the
@@ -969,7 +1028,10 @@ export default function Settings() {
 
       {isOwner(user.role) && (
       <div className="card">
-        <h2>☁️ Cloud Backup (Google Drive)</h2>
+        <h2>☁️ Cloud Backup (Google Drive){' '}
+          <a href="#guide" onClick={(e) => { e.preventDefault(); setGuide('drive'); }}
+            style={{ fontSize: 14, fontWeight: 600 }}>📖 Guide</a>
+        </h2>
         <p style={{ color: 'var(--ink-soft)', marginTop: 0 }}>
           Encrypts a daily copy of all your data and uploads it to your own Google Drive — off-site,
           so a stolen or dead computer doesn’t lose everything. Files are <b>AES-256 encrypted on this
@@ -979,8 +1041,9 @@ export default function Settings() {
         {!backup?.hasClientCredentials && (
           <div className="field-group" style={{ marginBottom: 10 }}>
             <p style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 0 }}>
-              One-time setup: create a Google Cloud <b>Desktop</b> OAuth client (see
-              {' '}<code>docs/GOOGLE-DRIVE-BACKUP.md</code>) and paste its id + secret here.
+              One-time setup: create a Google Cloud <b>Desktop</b> OAuth client and paste its id + secret
+              here.{' '}<a href="#guide" onClick={(e) => { e.preventDefault(); setGuide('drive'); }}
+                style={{ fontWeight: 600 }}>Open the step-by-step Guide →</a>
             </p>
             <div className="form-grid">
               <div className="field">
@@ -1059,6 +1122,7 @@ export default function Settings() {
         <TemplateModal template={modal.template} onClose={() => setModal(null)} onSaved={load} />)}
       {modal && 'pair' in modal && (
         <PairDeviceModal users={users} onClose={() => { setModal(null); load(); }} />)}
+      {guide && <SetupGuideModal kind={guide} onClose={() => setGuide(null)} />}
     </>
   );
 }
