@@ -24,14 +24,12 @@ const SETUP_GUIDES = {
   },
   whatsapp: {
     title: '💬 WhatsApp inbox — setup guide',
-    intro: 'Two-way WhatsApp inside CallTrack: incoming chats link to leads automatically and you reply from the CRM. Use a DEDICATED business number — this is the unofficial WhatsApp Web protocol and a personal number risks a ban.',
+    intro: 'Two-way WhatsApp inside CallTrack: incoming chats link to leads automatically and you reply from the CRM. The engine is already built in — no install needed. Only an admin can connect it, and it stays off until you do. Use a DEDICATED business number — this is the unofficial WhatsApp Web protocol and a personal number risks a ban.',
     steps: [
-      { t: 'Install the engine (office computer only)', d: `In the project folder on the office Mac, run this once. It installs the WhatsApp engine on this machine only — it is deliberately not part of the normal install, so no one else can run it.`, cmd: 'npm run whatsapp:install' },
-      { t: 'Restart the server', d: `So it picks up the engine, restart the CallTrack server:`, cmd: 'launchctl kickstart -k gui/$(id -u)/com.calltrack.crm' },
-      { t: 'Use a dedicated business number', d: `Put a dedicated business WhatsApp number on a phone that is on the office WiFi. Never a personal number.` },
-      { t: 'Connect', d: `Back on this page, click Connect — a QR code appears.` },
+      { t: 'Use a dedicated business number', d: `Put a dedicated business WhatsApp number on a phone that is on the office WiFi. Never a personal number — a ban would take down the office WhatsApp.` },
+      { t: 'Click Connect', d: `On this card, click "Connect WhatsApp" — a QR code appears.` },
       { t: 'Scan it', d: `On the business phone: WhatsApp, Settings, Linked devices, Link a device, then scan the QR.` },
-      { t: 'Done', d: `Status turns "connected" and a WhatsApp item appears in the sidebar. Incoming messages link to leads, show in the timeline, and you can reply. Phone notifications need the Android app rebuild (docs/WHATSAPP-MOBILE.md).` },
+      { t: 'Done', d: `Status turns "connected" and a WhatsApp item appears in the sidebar. Incoming messages link to leads, show in the timeline, and you can reply. Phone notifications on the mobile app need the Android rebuild (docs/WHATSAPP-MOBILE.md).` },
     ],
   },
 };

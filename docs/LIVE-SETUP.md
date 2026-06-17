@@ -79,15 +79,9 @@ the CRM. The Android app can also pop a local notification on new messages.
 > personal account. The office Mac must stay on and online for it to work; it's one account only.
 
 ### One-time
-1. On the **main office computer only**, in the project folder, run **`npm run whatsapp:install`**.
-   This installs the WhatsApp engine (Baileys) on *that* machine only — it is **deliberately not part
-   of the normal install**, so teammates' copies and anyone who downloads CallTrack never get it and
-   **cannot run WhatsApp**. (On any machine without it, Settings → WhatsApp shows an "install it on the
-   office computer" note instead of a Connect button.)
+1. The WhatsApp engine is **built into the app** — there is nothing to install. (Only an **admin** can
+   connect it, and it stays **off** until an admin does, so a caller can never turn it on.)
 2. Put your **business WhatsApp** on a phone that's on the **office WiFi**.
-
-> If you ever reinstall dependencies (`npm install` / `npm ci`) on the main computer, re-run
-> `npm run whatsapp:install` to put the engine back.
 
 ### Connect
 1. **Settings → WhatsApp** → click **Connect**. A **QR code** appears.
@@ -112,7 +106,7 @@ polls the office server, so the phone must be on the office WiFi.)
 |---|---|---|
 | Google Drive backup | Settings → Cloud Backup | Google Cloud OAuth client (free) + a passphrase |
 | Sarvam transcription | Settings → Cloud AI | A Sarvam API key |
-| WhatsApp inbox | Settings → WhatsApp | `npm run whatsapp:install` on the **main computer only** + a dedicated business number |
+| WhatsApp inbox | Settings → WhatsApp | A dedicated business number (engine is built in; an admin clicks Connect) |
 | WhatsApp phone alerts | Android rebuild | Android Studio build (see WHATSAPP-MOBILE.md) |
 
 All three are **off by default** — CallTrack stays fully on-network until you switch one on.
