@@ -103,15 +103,16 @@ async function waPoll() {
 // Returns: { raw } on success, { unavailable:true } if the plugin isn't
 // installed (browser/dev), or null if the user cancelled / scan failed.
 async function scanQr() {
-  const Scanner = window.Capacitor?.Plugins?.CapacitorBarcodeScanner;
+  // @capacitor-mlkit/barcode-scanning (Google ML Kit, registers as 'BarcodeScanner').
+  // Free + from Google's Maven — no JitPack token needed by anyone building the app.
+  const Scanner = window.Capacitor?.Plugins?.BarcodeScanner;
   if (!Scanner) return { unavailable: true };
   try {
-    // hint 17 = ALL barcode types (CapacitorBarcodeScannerTypeHint.ALL).
-    // The pairing QR is a QR code; ALL also reads it and is more forgiving.
-    const res = await Scanner.scanBarcode({ hint: 17 });
-    return { raw: res?.ScanResult || null };
+    // Google code scanner UI: no custom camera overlay, returns the scanned codes.
+    const res = await Scanner.scan();
+    return { raw: res?.barcodes?.[0]?.rawValue || null };
   } catch {
-    return null; // cancelled or camera/permission denied
+    return null; // cancelled, module unavailable, or permission denied → manual entry
   }
 }
 
