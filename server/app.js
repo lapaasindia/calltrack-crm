@@ -13,6 +13,7 @@ import { DATA_DIR } from './db.js';
 import { SqliteSessionStore } from './lib/sessionStore.js';
 import { requireAuth } from './middleware/auth.js';
 import { startBackupScheduler } from './lib/backup.js';
+import { startCloudBackupScheduler } from './lib/cloudBackup.js';
 import { ensureBootstrapped } from './bootstrap.js';
 
 import authRoutes from './routes/auth.js';
@@ -30,10 +31,25 @@ import settingsRoutes from './routes/settings.js';
 import syncRoutes from './routes/sync.js';
 import reviewRoutes from './routes/review.js';
 import taskRoutes from './routes/tasks.js';
+import projectRoutes from './routes/projects.js';
+import timeBlockRoutes from './routes/timeblocks.js';
+import currentWorkRoutes from './routes/current-work.js';
+import meetingRoutes from './routes/meetings.js';
 import deviceRoutes from './routes/devices.js';
-import aiRoutes from './routes/ai.js';
+import aiRoutes, { recordingsRouter } from './routes/ai.js';
+import routingRoutes from './routes/routing.js';
+import coachingRoutes from './routes/coaching.js';
+import auditRoutes from './routes/audit.js';
+import catalogRoutes from './routes/catalog.js';
+import invoiceRoutes from './routes/invoices.js';
+import notificationRoutes from './routes/notifications.js';
+import backupRoutes from './routes/backup.js';
+import dashboardRoutes from './routes/dashboard.js';
+import whatsappRoutes from './routes/whatsapp.js';
 import { startAiWorker } from './lib/ai.js';
 import { startRetentionJob } from './lib/recordingsRetention.js';
+import { startWhatsApp } from './lib/whatsapp.js';
+import dbDefault, { getSetting } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const APP_VERSION = '1.2.0';
@@ -140,8 +156,22 @@ export function createApp() {
   app.use('/api/sync', syncRoutes);
   app.use('/api/review', reviewRoutes);
   app.use('/api/tasks', taskRoutes);
+  app.use('/api/projects', projectRoutes);
+  app.use('/api/time-blocks', timeBlockRoutes);
+  app.use('/api/current-work', currentWorkRoutes);
+  app.use('/api/meetings', meetingRoutes);
   app.use('/api/devices', deviceRoutes);
   app.use('/api/ai', aiRoutes);
+  app.use('/api/recordings', recordingsRouter());
+  app.use('/api/routing-rules', routingRoutes);
+  app.use('/api/coaching', coachingRoutes);
+  app.use('/api/audit', auditRoutes);
+  app.use('/api/catalog', catalogRoutes);
+  app.use('/api/invoices', invoiceRoutes);
+  app.use('/api/notifications', notificationRoutes);
+  app.use('/api/backup', backupRoutes);
+  app.use('/api/dashboard', dashboardRoutes);
+  app.use('/api/whatsapp', whatsappRoutes);
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
 
@@ -173,8 +203,16 @@ export function startServer({ port = 3000 } = {}) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, '0.0.0.0', () => {
       startBackupScheduler();
+      startCloudBackupScheduler();
       startAiWorker();
       startRetentionJob();
+      // WhatsApp: default-OFF and lazy. startWhatsApp() returns immediately when
+      // whatsapp_enabled is false, and degrades (never throws) if baileys is not
+      // installed — so default boot stays clean and offline-safe.
+      if (getSetting('whatsapp_enabled', false) === true) {
+        startWhatsApp(dbDefault, { getSetting, dataDir: DATA_DIR })
+          .catch((e) => console.error('[whatsapp] boot start failed:', e && e.message));
+      }
       const hostname = os.hostname().replace(/\.local$/, '');
       resolve({
         server,

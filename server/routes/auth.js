@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import db from '../db.js';
 import { requireAuth, hashToken } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
+import { logAudit } from '../lib/audit.js';
 
 const router = Router();
 
@@ -55,6 +56,14 @@ router.post('/login', (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (!user || !user.is_active || !bcrypt.compareSync(password, user.password_hash)) {
+    logAudit({
+      action: 'LOGIN_FAILED',
+      user: user && user.is_active ? user : null,
+      entity_type: 'user',
+      entity_id: user?.id,
+      details: { username },
+      ip: req.ip,
+    });
     return res.status(401).json({ error: 'Invalid username or password' });
   }
 
@@ -62,11 +71,16 @@ router.post('/login', (req, res) => {
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ error: 'Session error' });
     req.session.userId = user.id;
+    logAudit({ action: 'LOGIN_SUCCESS', user, entity_type: 'user', entity_id: user.id, ip: req.ip });
     res.json({ id: user.id, username: user.username, full_name: user.full_name, role: user.role });
   });
 });
 
 router.post('/logout', (req, res) => {
+  const user = req.session?.userId
+    ? db.prepare('SELECT id, username, full_name, role FROM users WHERE id = ?').get(req.session.userId)
+    : null;
+  if (user) logAudit({ action: 'LOGOUT', user, entity_type: 'user', entity_id: user.id, ip: req.ip });
   req.session.destroy(() => res.json({ ok: true }));
 });
 

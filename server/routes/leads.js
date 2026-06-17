@@ -4,11 +4,21 @@ import { requireAdmin, loadLead } from '../middleware/auth.js';
 import { normalizePhone } from '../lib/phone.js';
 import { nowUtc } from '../lib/istTime.js';
 import { STAGES, changeStage } from '../lib/leadStage.js';
+import { recalcLeadScore } from '../lib/scoring.js';
+import { isAdmin } from '../lib/permissions.js';
+import { getAutoAssignedOwner } from '../lib/assignment.js';
 
 const router = Router();
 
+// Tolerant JSON parse for stored TEXT(json) columns — a malformed blob must
+// never 500 the lead page.
+function safeJson(s) {
+  if (!s) return null;
+  try { return JSON.parse(s); } catch { return null; }
+}
+
 const LEAD_COLS = `l.id, l.name, l.phone, l.alt_phone, l.email, l.city, l.source, l.stage,
-  l.lost_reason, l.assigned_to, l.notes, l.created_at, l.updated_at,
+  l.lost_reason, l.assigned_to, l.notes, l.score, l.ai_intent, l.created_at, l.updated_at,
   u.full_name AS assigned_to_name`;
 
 // List with filters. Callers are hard-scoped to their own leads at the SQL level.
@@ -110,10 +120,21 @@ router.post('/', (req, res) => {
     });
   }
 
-  // Callers can only create leads assigned to themselves.
+  // Non-admin (agent/caller/employee) can only create leads assigned to self.
+  // Admin-tier creators: an explicit assigned_to is respected; otherwise the
+  // lead is auto-routed (subject/source rule → round-robin → fallback).
   let assignedTo = req.user.id;
-  if (req.user.role === 'admin' && req.body.assigned_to !== undefined) {
-    assignedTo = req.body.assigned_to ? Number(req.body.assigned_to) : null;
+  let autoAssign = null;
+  if (isAdmin(req.user.role)) {
+    if (req.body.assigned_to !== undefined) {
+      assignedTo = req.body.assigned_to ? Number(req.body.assigned_to) : null;
+    } else {
+      autoAssign = getAutoAssignedOwner(db, {
+        subject: req.body.subject,
+        source: req.body.source,
+      });
+      assignedTo = autoAssign.userId;
+    }
   }
 
   const now = nowUtc();
@@ -126,7 +147,11 @@ router.post('/', (req, res) => {
     String(req.body.source || 'manual').trim() || 'manual',
     assignedTo, req.body.notes || null, now, now
   );
-  res.json({ id: info.lastInsertRowid });
+  res.json({
+    id: info.lastInsertRowid,
+    assigned_to: assignedTo,
+    auto_assign: autoAssign ? { method: autoAssign.method, reason: autoAssign.reason } : null,
+  });
 });
 
 // Lead detail: full timeline (calls + stage events), deals with balances, follow-up.
@@ -137,11 +162,20 @@ router.get('/:id', loadLead, (req, res) => {
     : null;
   const calls = db.prepare(
     `SELECT c.*, u.full_name AS user_name,
-       (SELECT r.id FROM recordings r WHERE r.call_id = c.id LIMIT 1) AS recording_id,
-       (SELECT r.summary FROM recordings r WHERE r.call_id = c.id LIMIT 1) AS recording_summary
+       r.id AS recording_id, r.summary AS recording_summary, r.transcript AS recording_transcript,
+       r.translation AS recording_translation, r.ai_json AS recording_ai_json,
+       r.provider AS recording_provider, r.ai_status AS recording_ai_status
      FROM calls c
-     JOIN users u ON u.id = c.user_id WHERE c.lead_id = ? ORDER BY c.called_at DESC`
+     JOIN users u ON u.id = c.user_id
+     LEFT JOIN recordings r ON r.id = (
+       SELECT r2.id FROM recordings r2 WHERE r2.call_id = c.id ORDER BY r2.id LIMIT 1
+     )
+     WHERE c.lead_id = ? ORDER BY c.called_at DESC`
   ).all(lead.id);
+  for (const c of calls) {
+    c.recording_ai = c.recording_ai_json ? safeJson(c.recording_ai_json) : null;
+    delete c.recording_ai_json;
+  }
   const events = db.prepare(
     `SELECT e.*, u.full_name AS user_name FROM lead_events e
      JOIN users u ON u.id = e.changed_by WHERE e.lead_id = ? ORDER BY e.changed_at DESC`
@@ -167,7 +201,9 @@ router.get('/:id', loadLead, (req, res) => {
   }
   res.json({
     ...lead, assigned_to_name: assignedName,
-    extra: lead.extra_json ? JSON.parse(lead.extra_json) : null,
+    extra: lead.extra_json ? safeJson(lead.extra_json) : null,
+    score_factors: safeJson(lead.score_factors),
+    ai_rating: safeJson(lead.ai_rating),
     calls, events, follow_up: followUp || null, deals,
   });
 });
@@ -194,10 +230,26 @@ router.patch('/:id', loadLead, (req, res) => {
     normPhone = norm.phone;
   }
 
+  // Optional note carried with a stage change (e.g. from the Kanban board's
+  // required drop-note). Appended to the lead's running notes as a dated line
+  // so it shows in the timeline; the stage change itself is recorded in
+  // lead_events by changeStage(). Only applied when the stage actually moves.
+  const stageNote = wantsStageChange && typeof req.body.note === 'string'
+    ? req.body.note.trim() : '';
+
   try {
     db.transaction(() => {
       if (wantsStageChange) {
         changeStage(lead.id, lead.stage, req.body.stage, req.user.id, req.body.lost_reason || null);
+        if (stageNote) {
+          const stamp = nowUtc();
+          const line = `[${stamp}] ${lead.stage} → ${req.body.stage}: ${stageNote}`;
+          const current = db.prepare('SELECT notes FROM leads WHERE id = ?').get(lead.id)?.notes;
+          db.prepare('UPDATE leads SET notes = ?, updated_at = ? WHERE id = ?')
+            .run(current ? `${current}\n${line}` : line, stamp, lead.id);
+        }
+        // Stage feeds the rule-based score (interested/follow_up boost it).
+        recalcLeadScore(db, lead.id);
       }
       if (req.body.assigned_to !== undefined) {
         const newAssignee = req.body.assigned_to ? Number(req.body.assigned_to) : null;

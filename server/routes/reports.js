@@ -55,6 +55,7 @@ router.get('/leaderboard', (req, res) => {
               COUNT(DISTINCT lead_id) AS unique_leads
        FROM calls WHERE called_at >= ? AND called_at < ?
          AND (auto_logged = 0 OR disposition = 'connected')
+         AND source != 'whatsapp'
        GROUP BY user_id
      ) c ON c.user_id = u.id
      LEFT JOIN (
@@ -101,6 +102,7 @@ router.get('/agent-daily', (req, res) => {
      FROM calls c JOIN users u ON u.id = c.user_id
      WHERE c.called_at >= ? AND c.called_at < ?
        AND (c.auto_logged = 0 OR c.disposition = 'connected')
+       AND c.source != 'whatsapp'
      GROUP BY day, u.id ORDER BY day DESC, dials DESC`
   ).all(startUtc, endUtc);
 
@@ -201,6 +203,7 @@ router.get('/daily-trend', (req, res) => {
             SUM(disposition = 'connected') AS connects
      FROM calls WHERE called_at >= ? AND called_at < ?
        AND (auto_logged = 0 OR disposition = 'connected')
+       AND source != 'whatsapp'
      GROUP BY day ORDER BY day`
   ).all(startUtc, endUtc);
   const deals = db.prepare(
@@ -230,7 +233,8 @@ router.get('/summary', (req, res) => {
   const callsToday = db.prepare(
     `SELECT COUNT(*) AS dials, COALESCE(SUM(disposition='connected'),0) AS connects
      FROM calls WHERE called_at >= ? AND called_at < ?
-       AND (auto_logged = 0 OR disposition = 'connected')`
+       AND (auto_logged = 0 OR disposition = 'connected')
+       AND source != 'whatsapp'`
   ).get(startUtc, endUtc);
   const dealsToday = db.prepare(
     "SELECT COUNT(*) AS n, COALESCE(SUM(deal_value_paise),0) AS value FROM deals WHERE won_date = ? AND status != 'cancelled'"

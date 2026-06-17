@@ -3,6 +3,7 @@ import db from '../db.js';
 import { requireAdmin, loadLead, canAccessLead } from '../middleware/auth.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
+import { recalcLeadScore } from '../lib/scoring.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -86,7 +87,25 @@ router.post('/leads/:id/deals', loadLead, (req, res) => {
       'INSERT INTO installments (deal_id, seq, amount_paise, due_date, created_at) VALUES (?, ?, ?, ?, ?)'
     );
     for (const i of parsed) insertInst.run(id, i.seq, i.amount, i.due_date, now);
-    if (lead.stage !== 'won') changeStage(lead.id, lead.stage, 'won', req.user.id);
+    if (lead.stage !== 'won') {
+      changeStage(lead.id, lead.stage, 'won', req.user.id);
+      // Reflect the 'won' stage boost immediately (mirrors calls.js / leads.js
+      // PATCH, which rescore on every stage change) instead of waiting for the
+      // next call to be logged.
+      recalcLeadScore(db, lead.id);
+    }
+    // Seed the closer's learning journal with this win. The client can still
+    // prompt for a richer reflection via POST /api/coaching/learnings; this is
+    // the automatic 'deal_closed' marker so closes always show up in coaching.
+    db.prepare(
+      `INSERT INTO daily_learnings (user_id, entry_date, source, deal_id, learning, win, created_at)
+       VALUES (?, ?, 'deal_closed', ?, ?, ?, ?)`
+    ).run(
+      req.user.id, todayIst(), id,
+      `Closed a deal with ${lead.name} (${product.name}).`,
+      `Won ₹${(value / 100).toLocaleString('en-IN')} — ${product.name}`,
+      now
+    );
     return id;
   })();
 

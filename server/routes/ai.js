@@ -1,9 +1,13 @@
 import { Router } from 'express';
-import db, { setSetting } from '../db.js';
+import db, { getSetting, setSetting } from '../db.js';
 import { requireAdmin, canAccessLead } from '../middleware/auth.js';
+import { isOwner } from '../lib/permissions.js';
 import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
-import { aiStatus, runAiQueueOnce } from '../lib/ai.js';
+import { aiStatus, runAiQueueOnce, analyzeRecordingTranscript } from '../lib/ai.js';
+import { transcribeWithSarvam } from '../lib/sarvam.js';
+import { RECORDINGS_BASE } from './sync.js';
+import path from 'node:path';
 
 const router = Router();
 
@@ -89,5 +93,68 @@ router.post('/suggestions/:id/dismiss', (req, res) => {
     .run(req.user.id, nowUtc(), ctx.s.id);
   res.json({ ok: true });
 });
+
+// Recordings router (mounted at /api/recordings). The hybrid cloud-transcription
+// opt-in. Injectable transcribe/analyze fns let tests run the gating + plumbing
+// with NO ffmpeg, NO network and NO Ollama.
+export function recordingsRouter({
+  transcribeFn = transcribeWithSarvam,
+  analyzeFn = analyzeRecordingTranscript,
+} = {}) {
+  const r = Router();
+
+  // POST /api/recordings/:id/transcribe-cloud — send THIS one file to Sarvam.
+  r.post('/:id/transcribe-cloud', async (req, res) => {
+    const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(req.params.id);
+    if (!rec) return res.status(404).json({ error: 'Recording not found' });
+
+    // Gating: cloud must be enabled AND a key configured.
+    if (!getSetting('ai_cloud_enabled', false)) {
+      return res.status(400).json({ error: 'Cloud AI is disabled. Enable it in Settings first.' });
+    }
+    const apiKey = getSetting('sarvam_api_key', '');
+    if (!apiKey) {
+      return res.status(400).json({ error: 'No Sarvam API key configured.' });
+    }
+
+    // Access: owner tier, the uploader, or the linked lead's assignee.
+    let allowed = isOwner(req.user.role) || rec.user_id === req.user.id;
+    let lead = null;
+    if (rec.call_id) {
+      lead = db.prepare(
+        'SELECT l.* FROM leads l JOIN calls c ON c.lead_id = l.id WHERE c.id = ?'
+      ).get(rec.call_id);
+      if (lead && canAccessLead(req.user, lead)) allowed = true;
+    }
+    if (!allowed) return res.status(403).json({ error: 'No access to this recording' });
+
+    const fileAbs = path.join(RECORDINGS_BASE, rec.file_path);
+    let result;
+    try {
+      result = await transcribeFn(fileAbs, { apiKey });
+    } catch (err) {
+      return res.status(502).json({ error: `Sarvam transcription failed: ${err.message}` });
+    }
+
+    // Store the cloud transcript + English translation, tag the provider.
+    db.prepare(
+      "UPDATE recordings SET transcript = ?, translation = ?, provider = 'sarvam', ai_status = 'done' WHERE id = ?"
+    ).run(result.transcript || '', result.translation || null, rec.id);
+
+    // Re-run extraction → suggestions + derived lead AI fields on the new text.
+    const analysis = await analyzeFn(rec.id, result.transcript || result.translation || '');
+
+    res.json({
+      ok: true,
+      provider: 'sarvam',
+      language: result.language,
+      transcript: result.transcript,
+      translation: result.translation,
+      analysis,
+    });
+  });
+
+  return r;
+}
 
 export default router;

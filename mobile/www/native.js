@@ -5,6 +5,12 @@ const Cap = window.Capacitor;
 const Plugin = Cap?.Plugins?.CallSync;
 export const isNative = !!Plugin;
 
+// @capacitor/local-notifications — optional. Absent in the browser preview and
+// in any build where the plugin hasn't been `npm i`'d + `cap sync`'d yet (see
+// docs/WHATSAPP-MOBILE.md). Every call below no-ops gracefully without it, the
+// same way the CallSync mock keeps the UI clickable in dev.
+const LocalNotifications = Cap?.Plugins?.LocalNotifications;
+
 const mock = {
   async getState() {
     return {
@@ -47,4 +53,37 @@ export const Native = {
   checkForUpdate: () => P.checkForUpdate(),
   installUpdate: (url) => P.installUpdate({ url }),
   clearConfig: () => P.clearConfig(),
+
+  // ---- Local notifications (optional; for WhatsApp inbound alerts) ----
+  // True only when the plugin is actually present on this build.
+  hasNotifications: !!LocalNotifications,
+
+  // Ask once on boot. Returns true if we may post notifications. On Android 13+
+  // this surfaces the POST_NOTIFICATIONS runtime prompt. Never throws.
+  async requestNotificationPermission() {
+    if (!LocalNotifications) return false;
+    try {
+      const r = await LocalNotifications.requestPermissions();
+      return r?.display === 'granted';
+    } catch { return false; }
+  },
+
+  // Schedule (immediately fire) a single local notification. `id` should be a
+  // stable 32-bit int so repeats replace rather than stack. No-ops — and never
+  // throws — when the plugin or permission is absent, mirroring how the other
+  // optional native calls degrade in the browser preview.
+  async notify({ id, title, body }) {
+    if (!LocalNotifications) return false;
+    try {
+      await LocalNotifications.schedule({
+        notifications: [{
+          id: ((id | 0) || (Date.now() % 2147483647)),
+          title: title || 'CallTrack',
+          body: body || '',
+          smallIcon: 'ic_stat_calltrack',
+        }],
+      });
+      return true;
+    } catch { return false; }
+  },
 };

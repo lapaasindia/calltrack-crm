@@ -71,6 +71,14 @@ export function dtLocalToUtcIso(dtLocal) {
   return new Date(Date.UTC(y, m - 1, day, h, min) - IST_OFFSET_MS).toISOString();
 }
 
+// Inverse of dtLocalToUtcIso: a UTC instant → the 'YYYY-MM-DDTHH:mm' value a
+// datetime-local input expects, expressed as IST wall time (so editing a saved
+// instant shows the same clock time the user picked, in every browser tz).
+export function utcIsoToDtLocal(utcIso) {
+  if (!utcIso) return '';
+  return new Date(Date.parse(utcIso) + IST_OFFSET_MS).toISOString().slice(0, 16);
+}
+
 // Is this UTC instant before the start of today (IST)? → overdue badge
 export function isOverdue(utcIso) {
   const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })

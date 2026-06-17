@@ -53,21 +53,96 @@ async function transcribe(wavPath, language) {
   return text;
 }
 
-const EXTRACT_PROMPT = (transcript, leadName, company) => `You are a CRM assistant for an Indian sales/calling team at ${company}. A call with the lead "${leadName}" was transcribed (Hindi/English mix). Read it and extract structured data.
+const EXTRACT_PROMPT = (transcript, leadName, company) => `You are a CRM assistant and sales-call coach for an Indian sales/calling team at ${company}. A call with the lead "${leadName}" was transcribed (Hindi/English mix). Read it and extract structured data plus a short coaching review of the AGENT's performance.
 
 TRANSCRIPT:
 """${transcript.slice(0, 6000)}"""
 
 Reply with ONLY a JSON object (no markdown), with these keys:
 - "summary": one or two sentences, in English, on what happened.
-- "sentiment": one of "positive","neutral","negative".
+- "sentiment": one of "positive","neutral","negative","mixed".
 - "outcome": one of "interested","not_interested","callback","payment_promised","wrong_number","other".
+- "intent": the lead's buying intent, one of "Hot","Warm","Cold","Informational","Follow-up Required".
+- "rating": an object scoring the AGENT 1-10 on {"clarity":n,"engagement":n,"conversion":n,"overall":n}.
+- "strengths": up to 3 short strings, what the agent did well.
+- "improvements": up to 3 short strings, what the agent should do better.
+- "coaching": one short actionable coaching tip for the agent.
+- "status_reason": one short sentence explaining the intent classification.
 - "city": the customer's city if clearly stated, else null.
 - "interest": product/program/service they asked about, else null.
 - "follow_up": if they asked to be contacted again at a specific time, an object {"when":"YYYY-MM-DD","reason":"..."} (resolve relative dates against today ${todayIst()} IST), else null.
 - "task": if the caller must do something concrete (send brochure, share link, etc.), a short imperative string, else null.
 
 JSON:`;
+
+// Intent → a buying-intent base (0..100). Combined with the agent rating to
+// produce ai_score, so a Hot lead from a well-run call scores highest.
+const INTENT_BASE = {
+  Hot: 90,
+  Warm: 65,
+  'Follow-up Required': 55,
+  Cold: 25,
+  Informational: 35,
+};
+const SENTIMENTS = new Set(['positive', 'neutral', 'negative', 'mixed']);
+const INTENTS = new Set(['Hot', 'Warm', 'Cold', 'Informational', 'Follow-up Required']);
+
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const num1to10 = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? clamp(Math.round(n), 1, 10) : null;
+};
+const cap3 = (arr) => (Array.isArray(arr)
+  ? arr.filter((x) => typeof x === 'string' && x.trim()).slice(0, 3).map((s) => s.trim())
+  : []);
+
+// PURE: map a parsed analysis object onto the lead's ai_* columns. Unit-testable
+// without Ollama. Tolerates a partial/garbage analysis — every field is guarded
+// and the function never throws. `now` is injectable for deterministic tests.
+export function deriveLeadAiFields(analysis, now = nowUtc()) {
+  const a = analysis && typeof analysis === 'object' ? analysis : {};
+
+  const intent = INTENTS.has(a.intent) ? a.intent : null;
+  const sentiment = SENTIMENTS.has(a.sentiment) ? a.sentiment : null;
+
+  const r = a.rating && typeof a.rating === 'object' ? a.rating : {};
+  const rating = {
+    clarity: num1to10(r.clarity),
+    engagement: num1to10(r.engagement),
+    conversion: num1to10(r.conversion),
+    overall: num1to10(r.overall),
+  };
+  const hasRating = Object.values(rating).some((v) => v !== null);
+
+  // ai_score (0..100): blend the buying-intent base with the agent's overall
+  // rating (and conversion, which most directly predicts a close). When no
+  // intent is given, fall back to the rating alone; when neither, null.
+  let aiScore = null;
+  const base = intent ? INTENT_BASE[intent] : null;
+  const overall = rating.overall ?? rating.conversion;
+  if (base !== null && overall !== null) {
+    aiScore = clamp(Math.round(base * 0.6 + overall * 10 * 0.4), 0, 100);
+  } else if (base !== null) {
+    aiScore = base;
+  } else if (overall !== null) {
+    aiScore = clamp(Math.round(overall * 10), 0, 100);
+  }
+
+  return {
+    ai_score: aiScore,
+    ai_intent: intent,
+    ai_sentiment: sentiment,
+    ai_rating: hasRating ? JSON.stringify(rating) : null,
+    ai_status_reason: typeof a.status_reason === 'string' && a.status_reason.trim()
+      ? a.status_reason.trim()
+      : null,
+    ai_analyzed_at: now,
+    // Normalized lists kept on the analysis blob for the recording UI.
+    strengths: cap3(a.strengths),
+    improvements: cap3(a.improvements),
+    coaching: typeof a.coaching === 'string' ? a.coaching.trim() : null,
+  };
+}
 
 async function extract(transcript, leadName, company) {
   const res = await fetch(`${OLLAMA_URL}/api/generate`, {
@@ -112,6 +187,20 @@ function makeSuggestions(recordingId, leadId, lead, ai) {
   }
 }
 
+// Persist the reviewed analysis onto the linked lead's ai_* columns. The
+// review-before-apply model is unchanged — these are DERIVED read-only signals
+// (score/intent/sentiment/coaching), NOT lead fields like city/notes, which
+// still flow through ai_suggestions and require a human accept. Caller wraps
+// this in its own transaction when batching with other writes.
+export function applyLeadAiFields(leadId, analysis) {
+  if (!leadId) return;
+  const d = deriveLeadAiFields(analysis);
+  db.prepare(
+    `UPDATE leads SET ai_score = ?, ai_intent = ?, ai_sentiment = ?, ai_rating = ?,
+                      ai_status_reason = ?, ai_analyzed_at = ? WHERE id = ?`
+  ).run(d.ai_score, d.ai_intent, d.ai_sentiment, d.ai_rating, d.ai_status_reason, d.ai_analyzed_at, leadId);
+}
+
 // Process one recording end to end. Returns true if it did work.
 export async function processRecording(rec) {
   const language = getSetting('ai_language', 'auto');
@@ -150,7 +239,10 @@ export async function processRecording(rec) {
       db.prepare(
         "UPDATE recordings SET ai_status = 'done', transcript = ?, summary = ?, ai_json = ? WHERE id = ?"
       ).run(transcript, ai?.summary || null, ai ? JSON.stringify(ai) : null, rec.id);
-      if (ai && lead) makeSuggestions(rec.id, lead.id, lead, ai);
+      if (ai && lead) {
+        makeSuggestions(rec.id, lead.id, lead, ai);
+        applyLeadAiFields(lead.id, ai);
+      }
     })();
     return true;
   } catch (e) {
@@ -160,6 +252,43 @@ export async function processRecording(rec) {
   } finally {
     if (wav) fs.rmSync(wav, { force: true });
   }
+}
+
+// Re-run the Ollama extraction for an already-transcribed recording and persist
+// the analysis (recording ai_json + summary, reviewable suggestions, derived
+// lead ai_* fields). Used by the cloud-transcription route after Sarvam returns
+// a transcript. `extractFn` is injectable so tests can supply a fake (no Ollama).
+// Returns the parsed analysis object (or null if extraction failed).
+export async function analyzeRecordingTranscript(recId, transcript, { extractFn = extract } = {}) {
+  const company = getSetting('company_name', 'our company');
+  const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(recId);
+  if (!rec) return null;
+  const leadId = rec.call_id
+    ? db.prepare('SELECT lead_id FROM calls WHERE id = ?').get(rec.call_id)?.lead_id
+    : null;
+  const lead = leadId ? db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId) : null;
+
+  let ai = null;
+  try {
+    ai = transcript ? await extractFn(transcript, lead?.name || 'the customer', company) : null;
+  } catch (e) {
+    console.error('[ai] cloud extraction failed:', e.message);
+  }
+
+  db.transaction(() => {
+    db.prepare("UPDATE recordings SET summary = ?, ai_json = ? WHERE id = ?")
+      .run(ai?.summary || null, ai ? JSON.stringify(ai) : null, recId);
+    if (ai && lead) {
+      // Re-analyzing a recording (e.g. cloud transcription after a local pass)
+      // would otherwise stack a second set of review cards. Drop any still-
+      // pending suggestions from a prior run before re-inserting; already
+      // accepted/rejected ones are left untouched.
+      db.prepare("DELETE FROM ai_suggestions WHERE recording_id = ? AND status = 'pending'").run(recId);
+      makeSuggestions(recId, lead.id, lead, ai);
+      applyLeadAiFields(lead.id, ai);
+    }
+  })();
+  return ai;
 }
 
 let running = false;

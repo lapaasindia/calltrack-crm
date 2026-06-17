@@ -71,7 +71,8 @@ router.get('/', (req, res) => {
             SUM(disposition = 'connected') AS connects,
             COUNT(DISTINCT lead_id) AS unique_leads
      FROM calls WHERE user_id = ? AND called_at >= ? AND called_at < ?
-       AND (auto_logged = 0 OR disposition = 'connected')`
+       AND (auto_logged = 0 OR disposition = 'connected')
+       AND source != 'whatsapp'`
   ).get(statsUser, startUtc, endUtc);
   const dealsToday = db.prepare(
     'SELECT COUNT(*) AS n FROM deals WHERE created_by = ? AND won_date = ?'

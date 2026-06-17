@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso } from '../api.js';
 import { useApp } from '../App.jsx';
-import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal } from '../components.jsx';
+import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal,
+  ScoreBadge, AiIntelPanel, TranscriptToggle } from '../components.jsx';
 
 const DISPOSITION_LABELS = {
   connected: '✅ Connected', not_picked: '📵 Not picked', busy: '⏳ Busy',
@@ -224,6 +225,131 @@ function PaymentModal({ deal, onClose, onSaved }) {
   );
 }
 
+// Generate a GST invoice for a won lead. Seeds Bill To + line items from the
+// lead / its first deal; live subtotal/GST/total are computed CLIENT-SIDE in
+// integer paise (gst_percent from settings). On create, offers Open / Print
+// which opens the print-ready HTML in a new tab.
+function GenerateInvoiceModal({ lead, onClose }) {
+  const { showToast } = useApp();
+  const navigate = useNavigate();
+  const [gstPercent, setGstPercent] = useState(18);
+  const [billTo, setBillTo] = useState({
+    bill_to_name: lead.name || '',
+    bill_to_email: lead.email || '',
+    bill_to_phone: lead.phone || '',
+    bill_to_address: lead.city || '',
+  });
+  const deal = lead.deals && lead.deals[0];
+  const [rows, setRows] = useState(() => {
+    if (deal) {
+      return [{ description: deal.product_name, qty: 1, unit_rupees: String(deal.deal_value_paise / 100) }];
+    }
+    return [{ description: 'Consulting Services', qty: 1, unit_rupees: '' }];
+  });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get('/api/settings').then((s) => setGstPercent(Number(s.gst_percent ?? 18))).catch(() => {});
+  }, []);
+
+  const setRow = (i, k, v) => setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+  const addRow = () => setRows((rs) => [...rs, { description: '', qty: 1, unit_rupees: '' }]);
+  const removeRow = (i) => setRows((rs) => rs.filter((_, idx) => idx !== i));
+
+  // All paise. Blank/invalid unit → 0 for the preview.
+  const unitPaise = (r) => Math.round(Number(r.unit_rupees) * 100) || 0;
+  const lineAmount = (r) => (Number.isInteger(Number(r.qty)) && Number(r.qty) > 0 ? Number(r.qty) : 1) * unitPaise(r);
+  const subtotal = rows.reduce((s, r) => s + lineAmount(r), 0);
+  const tax = Math.round((subtotal * gstPercent) / 100);
+  const total = subtotal + tax;
+
+  const valid = rows.length > 0
+    && rows.every((r) => r.description.trim() && unitPaise(r) >= 0)
+    && subtotal > 0;
+
+  const create = async () => {
+    setSaving(true);
+    try {
+      const res = await api.post('/api/invoices', {
+        lead_id: lead.id,
+        deal_id: deal?.id || null,
+        ...billTo,
+        items: rows.map((r) => ({
+          description: r.description.trim(),
+          qty: Number.isInteger(Number(r.qty)) && Number(r.qty) > 0 ? Number(r.qty) : 1,
+          unit_price_paise: unitPaise(r),
+        })),
+      });
+      showToast('Invoice created ✓');
+      onClose();
+      if (window.confirm('Invoice created. Open the print-ready version now?')) {
+        window.open(`/api/invoices/${res.id}/html`, '_blank');
+      }
+      navigate(`/invoices/${res.id}`);
+    } catch (err) {
+      showToast(err.message, 'error');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Generate invoice — ${lead.name}`} onClose={onClose}>
+      <div className="form-grid">
+        <div className="field">
+          <label>Bill to (name)</label>
+          <input value={billTo.bill_to_name}
+            onChange={(e) => setBillTo((v) => ({ ...v, bill_to_name: e.target.value }))} />
+        </div>
+        <div className="field">
+          <label>Phone</label>
+          <input value={billTo.bill_to_phone}
+            onChange={(e) => setBillTo((v) => ({ ...v, bill_to_phone: e.target.value }))} />
+        </div>
+        <div className="field">
+          <label>Email</label>
+          <input value={billTo.bill_to_email}
+            onChange={(e) => setBillTo((v) => ({ ...v, bill_to_email: e.target.value }))} />
+        </div>
+        <div className="field">
+          <label>Address</label>
+          <input value={billTo.bill_to_address}
+            onChange={(e) => setBillTo((v) => ({ ...v, bill_to_address: e.target.value }))} />
+        </div>
+      </div>
+
+      <div className="field">
+        <label>Line items</label>
+        {rows.map((r, i) => (
+          <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+            <input style={{ flex: 2 }} placeholder="Description" value={r.description}
+              onChange={(e) => setRow(i, 'description', e.target.value)} />
+            <input style={{ width: 56 }} inputMode="numeric" placeholder="Qty" value={r.qty}
+              onChange={(e) => setRow(i, 'qty', e.target.value)} />
+            <input style={{ flex: 1 }} inputMode="numeric" placeholder="₹ unit" value={r.unit_rupees}
+              onChange={(e) => setRow(i, 'unit_rupees', e.target.value)} />
+            <button type="button" className="btn small secondary" disabled={rows.length === 1}
+              onClick={() => removeRow(i)}>✕</button>
+          </div>
+        ))}
+        <button type="button" className="btn small secondary" onClick={addRow}>+ Add line</button>
+      </div>
+
+      <div style={{ marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+        <div className="pb-line"><span>Subtotal</span><b>{rupees(subtotal)}</b></div>
+        <div className="pb-line"><span>GST ({gstPercent}%)</span><b>{rupees(tax)}</b></div>
+        <div className="pb-line"><span><b>Total Due</b></span><b style={{ fontSize: 17 }}>{rupees(total)}</b></div>
+      </div>
+
+      <div className="modal-actions">
+        <button className="btn secondary" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={saving || !valid} onClick={create}>
+          {saving ? 'Creating…' : 'Create invoice'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 function FollowUpModal({ lead, onClose, onSaved }) {
   const { showToast } = useApp();
   const [dueAt, setDueAt] = useState('');
@@ -259,16 +385,33 @@ export default function LeadDetail() {
   const { id } = useParams();
   const { user, showToast } = useApp();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [lead, setLead] = useState(null);
   const [error, setError] = useState(null);
   const [modal, setModal] = useState(null); // 'call' | 'win' | 'followup' | {payment: deal}
   const [users, setUsers] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
+  const [cloudEnabled, setCloudEnabled] = useState(false);
+  const [transcribingId, setTranscribingId] = useState(null);
 
   const load = useCallback(() => {
     api.get(`/api/leads/${id}`).then(setLead).catch((e) => setError(e.message));
     api.get(`/api/ai/suggestions?lead_id=${id}`).then(setSuggestions).catch(() => {});
   }, [id]);
+
+  const transcribeCloud = async (recordingId) => {
+    if (!window.confirm(
+      'Send this one recording to Sarvam (cloud) for Hindi transcription?\n\n'
+      + 'This is the only time audio leaves the office. Continue?'
+    )) return;
+    setTranscribingId(recordingId);
+    try {
+      await api.post(`/api/recordings/${recordingId}/transcribe-cloud`);
+      showToast('Transcribed with Sarvam ✓');
+      load();
+    } catch (err) { showToast(err.message, 'error'); }
+    finally { setTranscribingId(null); }
+  };
 
   const actSuggestion = async (s, action) => {
     try {
@@ -277,10 +420,22 @@ export default function LeadDetail() {
     } catch (err) { showToast(err.message, 'error'); }
   };
   useEffect(() => { load(); }, [load]);
+  // Deep-link from the Kanban board: dropping a lead into "Won" navigates here
+  // with ?win=1 to open the Win Deal flow directly. Consume the param once so a
+  // refresh doesn't reopen it.
+  useEffect(() => {
+    if (searchParams.get('win') === '1') {
+      setModal('win');
+      const next = new URLSearchParams(searchParams);
+      next.delete('win');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   useEffect(() => {
     if (user.role === 'admin') {
       api.get('/api/users').then((u) => setUsers(u.filter((x) => x.is_active))).catch(() => {});
     }
+    api.get('/api/settings').then((s) => setCloudEnabled(!!s.ai_cloud_enabled)).catch(() => {});
   }, [user.role]);
 
   if (error) return <div className="card empty"><div className="big">🚫</div>{error}</div>;
@@ -326,6 +481,7 @@ export default function LeadDetail() {
         <h1 style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <a onClick={() => navigate(-1)} style={{ cursor: 'pointer' }}>←</a>
           {lead.name} <StageBadge stage={lead.stage} />
+          <ScoreBadge score={lead.score} factors={lead.score_factors} />
         </h1>
         <div className="actions">
           <a className="act-btn call" href={telLink(lead.phone)} title="Call">📞</a>
@@ -374,6 +530,9 @@ export default function LeadDetail() {
         )}
         {lead.stage === 'won' && (
           <button className="btn green" onClick={() => setModal('win')}>+ Another deal</button>
+        )}
+        {(lead.stage === 'won' || lead.deals.length > 0) && (
+          <button className="btn secondary" onClick={() => setModal('invoice')}>🧾 Generate invoice</button>
         )}
         {!lead.follow_up && (
           <button className="btn secondary" onClick={() => setModal('followup')}>⏰ Schedule follow-up</button>
@@ -482,10 +641,26 @@ export default function LeadDetail() {
                   {t.c.auto_logged ? ' · auto-logged' : ''}
                 </div>
                 {t.c.notes && <div className="tl-notes">{t.c.notes}</div>}
-                {t.c.recording_summary && <div className="tl-notes">🤖 {t.c.recording_summary}</div>}
                 {t.c.recording_id && (
-                  <audio controls preload="none" style={{ height: 34, marginTop: 6, maxWidth: '100%' }}
-                    src={`/api/review/audio/${t.c.recording_id}`} />
+                  <>
+                    <audio controls preload="none" style={{ height: 34, marginTop: 6, maxWidth: '100%' }}
+                      src={`/api/review/audio/${t.c.recording_id}`} />
+                    <AiIntelPanel ai={t.c.recording_ai} provider={t.c.recording_provider} />
+                    {!t.c.recording_ai && t.c.recording_summary && (
+                      <div className="tl-notes">🤖 {t.c.recording_summary}</div>
+                    )}
+                    <TranscriptToggle transcript={t.c.recording_transcript}
+                      translation={t.c.recording_translation} />
+                    {cloudEnabled && (
+                      <div style={{ marginTop: 6 }}>
+                        <button className="btn small secondary" disabled={transcribingId === t.c.recording_id}
+                          onClick={() => transcribeCloud(t.c.recording_id)}>
+                          {transcribingId === t.c.recording_id ? 'Transcribing…' : '☁️ Transcribe with Sarvam (cloud)'}
+                        </button>
+                        <span className="tl-meta" style={{ marginLeft: 8 }}>audio leaves the office</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -509,6 +684,7 @@ export default function LeadDetail() {
           onClose={() => setModal(null)} onSaved={load} />
       )}
       {modal === 'win' && <WinDealModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
+      {modal === 'invoice' && <GenerateInvoiceModal lead={lead} onClose={() => setModal(null)} />}
       {modal === 'followup' && <FollowUpModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
       {modal === 'task' && <TaskModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
       {modal?.payment && (

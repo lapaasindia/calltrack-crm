@@ -10,6 +10,7 @@ import { normalizePhone } from '../lib/phone.js';
 import { nowUtc } from '../lib/istTime.js';
 import { matchRecording } from '../lib/recordingMatch.js';
 import { changeStage } from '../lib/leadStage.js';
+import { recalcLeadScore } from '../lib/scoring.js';
 
 const router = Router();
 router.use(requireDevice);
@@ -65,6 +66,8 @@ router.post('/calls', (req, res) => {
         changeStage(lead.id, 'new', 'contacted', req.user.id);
         lead.stage = 'contacted';
       }
+      // A newly-attached call changed this lead's engagement → rescore.
+      if (info.changes) recalcLeadScore(db, lead.id);
       return info.changes
         ? { status: 'attached', lead_id: lead.id }
         : { status: 'duplicate', lead_id: lead.id };

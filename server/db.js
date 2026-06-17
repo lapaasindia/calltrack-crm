@@ -23,10 +23,20 @@ for (const file of files) {
   const num = parseInt(file, 10);
   if (num <= version) continue;
   const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-  db.transaction(() => {
+  // A migration whose FIRST line is the directive `-- migrate:no-transaction`
+  // runs WITHOUT the wrapping db.transaction(). Some rebuilds (e.g. swapping a
+  // table to widen a CHECK) need to toggle `PRAGMA foreign_keys` — which is a
+  // silent no-op inside a transaction — so such files manage their own atomicity.
+  const noTxn = /^\s*--\s*migrate:no-transaction\b/.test(sql);
+  if (noTxn) {
     db.exec(sql);
     db.pragma(`user_version = ${num}`);
-  })();
+  } else {
+    db.transaction(() => {
+      db.exec(sql);
+      db.pragma(`user_version = ${num}`);
+    })();
+  }
   version = num;
 }
 

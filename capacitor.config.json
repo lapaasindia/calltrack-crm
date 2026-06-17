@@ -11,6 +11,10 @@
     "androidScheme": "http"
   },
   "plugins": {
-    "CapacitorHttp": { "enabled": false }
+    "CapacitorHttp": { "enabled": false },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_calltrack",
+      "iconColor": "#1f7a4d"
+    }
   }
 }

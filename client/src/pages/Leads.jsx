@@ -2,7 +2,113 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { api, telLink, fmtDateTime } from '../api.js';
 import { useApp } from '../App.jsx';
-import { Modal, StageBadge, STAGE_LABELS, WhatsAppButton } from '../components.jsx';
+import { Modal, StageBadge, STAGE_LABELS, WhatsAppButton, ScoreBadge } from '../components.jsx';
+
+// Pipeline columns, in flow order. 'won' is terminal and entered only via the
+// Win Deal flow (server rejects a direct PATCH to 'won').
+const BOARD_STAGES = ['new', 'contacted', 'interested', 'follow_up', 'won', 'lost'];
+
+// One drag-and-drop pipeline board. Each column is the user's accessible leads
+// for that stage (server scoping is unchanged — callers see only their own).
+// Dropping a card changes the lead's stage after a required note; dropping into
+// 'won' hands off to the Win Deal flow on the lead page.
+function KanbanBoard({ user, showToast }) {
+  const navigate = useNavigate();
+  const [cols, setCols] = useState(null); // { stage: [leads] }
+  const [dragId, setDragId] = useState(null);
+  const [dragFrom, setDragFrom] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null);
+
+  const load = () => {
+    Promise.all(BOARD_STAGES.map((s) =>
+      api.get(`/api/leads?stage=${s}`).then((d) => [s, d.leads]).catch(() => [s, []])))
+      .then((pairs) => setCols(Object.fromEntries(pairs)));
+  };
+  useEffect(() => { load(); }, []);
+
+  const onDrop = async (toStage) => {
+    const id = dragId;
+    const fromStage = dragFrom;
+    setDropTarget(null);
+    setDragId(null);
+    setDragFrom(null);
+    if (!id || fromStage === toStage) return;
+
+    // 'won' is created through the deal flow, never a bare stage flip.
+    if (toStage === 'won') {
+      navigate(`/leads/${id}?win=1`);
+      return;
+    }
+
+    const note = window.prompt(`Add a note for moving to "${STAGE_LABELS[toStage]}" (required):`);
+    if (note == null || !note.trim()) {
+      showToast('A note is required to move a lead', 'error');
+      return;
+    }
+    const body = { stage: toStage, note: note.trim() };
+    if (toStage === 'lost') body.lost_reason = note.trim();
+
+    // Optimistic move; refetch on error to resync.
+    const moved = cols[fromStage].find((l) => l.id === id);
+    setCols((c) => ({
+      ...c,
+      [fromStage]: c[fromStage].filter((l) => l.id !== id),
+      [toStage]: moved ? [{ ...moved, stage: toStage }, ...c[toStage]] : c[toStage],
+    }));
+    try {
+      await api.patch(`/api/leads/${id}`, body);
+      showToast('Lead moved ✓');
+      load();
+    } catch (err) {
+      showToast(err.message, 'error');
+      load();
+    }
+  };
+
+  if (!cols) return <div className="card empty"><div className="big">📋</div>Loading board…</div>;
+
+  return (
+    <div className="kanban">
+      {BOARD_STAGES.map((stage) => (
+        <div
+          key={stage}
+          className={`kanban-col ${dropTarget === stage ? 'drop-on' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); if (dropTarget !== stage) setDropTarget(stage); }}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDropTarget(null); }}
+          onDrop={() => onDrop(stage)}
+        >
+          <div className="kanban-col-head">
+            <span><StageBadge stage={stage} /></span>
+            <span className="count">{cols[stage].length}</span>
+          </div>
+          <div className="kanban-cards">
+            {cols[stage].length === 0 && <div className="kanban-empty">Drop leads here</div>}
+            {cols[stage].map((l) => (
+              <div
+                key={l.id}
+                className={`kanban-card ${dragId === l.id ? 'dragging' : ''}`}
+                draggable
+                onDragStart={() => { setDragId(l.id); setDragFrom(stage); }}
+                onDragEnd={() => { setDragId(null); setDragFrom(null); setDropTarget(null); }}
+                onClick={() => navigate(`/leads/${l.id}`)}
+                title="Drag to another stage, or click to open"
+              >
+                <div className="kc-name">
+                  {l.name}
+                  {l.score != null && <ScoreBadge score={l.score} />}
+                </div>
+                <div className="kc-meta">
+                  {l.phone}{l.company ? ` · ${l.company}` : ''}{l.city ? ` · ${l.city}` : ''}
+                  {user.role === 'admin' && l.assigned_to_name ? ` · 👤 ${l.assigned_to_name}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function AddLeadModal({ onClose, onAdded }) {
   const { user, showToast } = useApp();
@@ -123,6 +229,7 @@ export default function Leads() {
   const source = params.get('source') || '';
   const assignedTo = params.get('assigned_to') || '';
   const page = Number(params.get('page')) || 1;
+  const view = params.get('view') === 'board' ? 'board' : 'list';
 
   const setParam = (k, v) => {
     const next = new URLSearchParams(params);
@@ -132,6 +239,7 @@ export default function Leads() {
   };
 
   useEffect(() => {
+    if (view === 'board') return; // board fetches its own per-column data
     const q = new URLSearchParams();
     if (stage) q.set('stage', stage);
     if (source) q.set('source', source);
@@ -139,7 +247,7 @@ export default function Leads() {
     if (params.get('q')) q.set('q', params.get('q'));
     if (page > 1) q.set('page', page);
     api.get(`/api/leads?${q}`).then(setData).catch(() => {});
-  }, [stage, source, assignedTo, page, params]);
+  }, [stage, source, assignedTo, page, params, view]);
 
   useEffect(() => {
     api.get('/api/leads/sources').then(setSources).catch(() => {});
@@ -178,10 +286,20 @@ export default function Leads() {
   return (
     <>
       <div className="page-title">
-        <h1>Leads {data ? <span style={{ color: 'var(--ink-faint)', fontSize: 15 }}>({data.total})</span> : ''}</h1>
-        <button className="btn" onClick={() => setAdding(true)}>+ Add lead</button>
+        <h1>Leads {view === 'list' && data ? <span style={{ color: 'var(--ink-faint)', fontSize: 15 }}>({data.total})</span> : ''}</h1>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <div className="view-toggle">
+            <button className={view === 'list' ? 'on' : ''} onClick={() => setParam('view', '')}>☰ List</button>
+            <button className={view === 'board' ? 'on' : ''} onClick={() => setParam('view', 'board')}>📋 Board</button>
+          </div>
+          <button className="btn" onClick={() => setAdding(true)}>+ Add lead</button>
+        </div>
       </div>
 
+      {view === 'board' && <KanbanBoard user={user} showToast={showToast} />}
+
+      {view === 'list' && (
+      <>
       <div className="filter-bar">
         <input type="search" placeholder="Search name / phone / city…" value={searchText} onChange={onSearch} />
         <select value={stage} onChange={(e) => setParam('stage', e.target.value)}>
@@ -252,6 +370,8 @@ export default function Leads() {
           <button className="btn small secondary" disabled={page >= totalPages}
             onClick={() => setParam('page', String(page + 1))}>Next →</button>
         </div>
+      )}
+      </>
       )}
 
       {adding && (

@@ -51,6 +51,54 @@ const todayIst = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkat
 let route = 'home';
 let lastState = null;
 
+// ── WhatsApp (Phase 6B groundwork) ─────────────────────────────────────────
+// The inbox lives behind the server's whatsapp_enabled flag. We cache it so the
+// tab + poll only appear when the office has WhatsApp on.
+let waEnabled = false;
+// Watermark of the newest inbound we've already notified about. Persisted so a
+// reopen doesn't re-notify old messages.
+let waSince = null;
+
+const fmtPhoneIn = (p) => {
+  const d = String(p || '').replace(/\D/g, '');
+  return d.length === 10 ? `+91 ${d.slice(0, 5)} ${d.slice(5)}` : (p || '');
+};
+
+// Poll /api/whatsapp/unread and fire a local notification for new inbound. Safe
+// when whatsapp is off (server returns {enabled:false}) or the plugin is absent.
+async function waPoll() {
+  if (!cfg) return;
+  try {
+    const q = waSince ? `?since=${encodeURIComponent(waSince)}` : '';
+    const res = await api(`/api/whatsapp/unread${q}`);
+    waEnabled = !!res.enabled;
+    if (!res.enabled || !res.latest) return;
+    // Advance the watermark to the newest inbound we've seen.
+    const newest = res.latest.sent_at;
+    if (waSince && newest <= waSince) return;
+    const prev = waSince;
+    waSince = newest;
+    await store.set('wa_since', waSince);
+    // Only notify if this is genuinely new (we had a prior watermark). De-dup is
+    // via the persisted `waSince` watermark above (we advance it before notifying
+    // and only fire when newest > the previous watermark), NOT the notification
+    // id — Native.notify uses res.latest.id, which is the growing wa_messages PK
+    // and is distinct per message. The Native bridge also no-ops gracefully when
+    // the plugin/permission is absent.
+    if (prev && res.latest.id) {
+      const who = res.latest.display_name || fmtPhoneIn(res.latest.phone) || 'WhatsApp';
+      await Native.notify({
+        id: res.latest.id,
+        title: `WhatsApp · ${who}`,
+        body: res.latest.body || 'New message',
+      });
+    }
+    // Refresh the badge / inbox if it's the active view.
+    if (route === 'whatsapp') renderWhatsApp();
+    else { renderChrome(); render(); }
+  } catch { /* offline / not paired — ignore */ }
+}
+
 // ===================== PAIRING =====================
 // Returns: { raw } on success, { unavailable:true } if the plugin isn't
 // installed (browser/dev), or null if the user cancelled / scan failed.
@@ -337,6 +385,76 @@ function renderError(msg) {
     <button class="btn ghost sm" onclick="location.reload()" style="width:auto;margin:0 auto">Retry</button></div>`;
 }
 
+// ===================== WHATSAPP INBOX =====================
+let waActiveContact = null;
+
+async function renderWhatsApp() {
+  const c = app.querySelector('.content');
+  if (!c) return;
+  if (waActiveContact) return renderWaThread(c, waActiveContact);
+  let contacts;
+  try { contacts = await api('/api/whatsapp/contacts'); }
+  catch (e) { return renderError(e.message); }
+  if (!contacts.length) {
+    c.innerHTML = '<div class="empty"><div class="big">💬</div>No WhatsApp conversations yet.</div>';
+    return;
+  }
+  c.innerHTML = contacts.map((ct) => {
+    const title = ct.lead_name || ct.display_name || fmtPhoneIn(ct.phone) || ct.wa_jid;
+    const last = (ct.last_direction === 'outgoing' ? '↩ ' : '') + (ct.last_body || '—');
+    const tag = ct.lead_id ? `<span class="badge">${ct.lead_name || 'lead'}</span>` : '<span class="badge muted">not a lead</span>';
+    return `<button class="wa-conv-row" data-id="${ct.id}">
+      <div class="wa-conv-title">${escapeHtml(title)} ${tag}</div>
+      <div class="wa-conv-sub">${escapeHtml(last)}</div>
+    </button>`;
+  }).join('');
+  c.querySelectorAll('.wa-conv-row').forEach((b) => {
+    b.onclick = () => { waActiveContact = Number(b.dataset.id); renderWhatsApp(); };
+  });
+}
+
+async function renderWaThread(c, contactId) {
+  let data;
+  try { data = await api(`/api/whatsapp/contacts/${contactId}/messages`); }
+  catch (e) { return renderError(e.message); }
+  const ct = data.contact;
+  const title = ct.lead_name || ct.display_name || fmtPhoneIn(ct.phone) || ct.wa_jid;
+  const bubbles = data.messages.map((m) => `
+    <div class="wa-b ${m.direction}">
+      <div>${escapeHtml(m.body || `[${m.message_type}]`)}</div>
+      <div class="wa-b-t">${fmtTime(Date.parse(m.sent_at))}</div>
+    </div>`).join('');
+  c.innerHTML = `
+    <div class="wa-thead">
+      <button class="btn ghost sm" id="wa-back" style="width:auto">← Back</button>
+      <b>${escapeHtml(title)}</b>
+    </div>
+    <div class="wa-msgs">${bubbles}</div>
+    <div class="wa-reply">
+      <input id="wa-reply" placeholder="Type a reply…" />
+      <button class="btn sm" id="wa-send" style="width:auto">Send</button>
+    </div>`;
+  c.querySelector('#wa-back').onclick = () => { waActiveContact = null; renderWhatsApp(); };
+  const input = c.querySelector('#wa-reply');
+  c.querySelector('#wa-send').onclick = async () => {
+    const body = input.value.trim();
+    if (!body) return;
+    try {
+      await api('/api/whatsapp/send-message', { method: 'POST', body: { contactId, body } });
+      input.value = '';
+      renderWaThread(c, contactId);
+    } catch (e) { toast(e.message, true); }
+  };
+  const msgs = c.querySelector('.wa-msgs');
+  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
+
 // ===================== CHROME + ROUTER =====================
 function renderChrome() {
   const reviewBadge = (lastState?.reviewCount || 0);
@@ -351,6 +469,7 @@ function renderChrome() {
     <div class="tabbar">
       ${tab('home', '☀️', 'Today')}
       ${tab('review', '🔍', 'Review', reviewBadge)}
+      ${waEnabled ? tab('whatsapp', '💬', 'Chats', lastState?.waUnread || 0) : ''}
       ${tab('settings', '⚙️', 'Settings')}
     </div>`;
   document.getElementById('syncbtn').onclick = doSync;
@@ -381,6 +500,7 @@ async function render() {
     if (s.total && !nb) renderChrome(), render(); }).catch(() => {});
   if (route === 'home') return renderHome();
   if (route === 'review') return renderReview();
+  if (route === 'whatsapp') return renderWhatsApp();
   if (route === 'settings') return renderSettings();
 }
 
@@ -391,14 +511,24 @@ async function boot() {
     cfg = JSON.parse(saved);
     await Native.configure({ serverUrl: cfg.serverUrl, token: cfg.token });
     lastState = await Native.getState();
+    waSince = (await store.get('wa_since')) || null;
+    // Ask for notification permission up front so WhatsApp alerts can fire.
+    // No-ops in the browser preview / when the plugin isn't installed yet.
+    await Native.requestNotificationPermission();
     // Sync on every app open — the primary path on Indian OEMs.
     if (isNative) Native.syncNow().then(async () => { lastState = await Native.getState(); render(); }).catch(() => {});
+    // WhatsApp unread: poll now + on a light 30s WebView timer. The real
+    // background path (foreground service polling while the app is closed) is
+    // documented in docs/WHATSAPP-MOBILE.md and wired in the native module.
+    waPoll();
+    setInterval(waPoll, 30000);
   }
   render();
   // Refresh when the app returns to foreground.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && cfg && route !== 'setup') {
       if (isNative) doSync(); else render();
+      waPoll();
     }
   });
 }

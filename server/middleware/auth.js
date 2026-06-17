@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import db from '../db.js';
+import { isAdmin, isOwner, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 
 export const hashToken = (token) =>
   crypto.createHash('sha256').update(token).digest('hex');
@@ -47,16 +48,26 @@ export function requireDevice(req, res, next) {
   next();
 }
 
+// Team-management tier: super_admin | admin | manager (and legacy 'admin').
 export function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  if (!isAdmin(req.user?.role)) return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+// Owner tier: super_admin | admin (and legacy 'admin'). Settings / catalog /
+// grade-delete actions that managers must NOT perform.
+export function requireOwner(req, res, next) {
+  if (!isOwner(req.user?.role)) return res.status(403).json({ error: 'Owner only' });
   next();
 }
 
 // Authorization rule used everywhere lead access is checked:
-// admins see all leads; callers only leads assigned to them.
+// super_admin/admin/manager see all leads; agent/caller/employee only leads
+// assigned to them; read_only may read but the route handlers gate writes.
 export function canAccessLead(user, lead) {
   if (!lead || lead.deleted_at) return false;
-  if (user.role === 'admin') return true;
+  if (canSeeAllLeads(user.role)) return true;
+  if (isReadOnly(user.role)) return false; // read_only is never "assigned"; no row access
   return lead.assigned_to === user.id;
 }
 

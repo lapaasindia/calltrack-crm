@@ -3,6 +3,7 @@ import db from '../db.js';
 import { loadLead } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
+import { recalcLeadScore } from '../lib/scoring.js';
 
 const DISPOSITIONS = ['connected', 'not_picked', 'busy', 'switched_off', 'wrong_number'];
 export const CALL_TYPES = ['sales', 'follow_up', 'collection', 'support'];
@@ -80,6 +81,9 @@ router.post('/', loadLead, (req, res) => {
     if (outcome === 'interested' && ['new', 'contacted', 'follow_up'].includes(stage)) move('interested');
     if (outcome === 'not_interested' && !['won', 'lost'].includes(stage)) move('lost', 'Not interested');
     if (nextFollowUp && ['new', 'contacted'].includes(stage)) move('follow_up');
+
+    // Recompute the rule-based lead score now that engagement/stage changed.
+    recalcLeadScore(db, lead.id);
 
     return { callId, stage };
   })();
