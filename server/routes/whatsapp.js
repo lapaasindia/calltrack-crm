@@ -20,7 +20,7 @@ import { logAudit } from '../lib/audit.js';
 import { isAdmin } from '../lib/permissions.js';
 import {
   getSession, setSessionState, resetWhatsApp, startWhatsApp,
-  logoutWhatsApp, sendText, jidToPhone,
+  logoutWhatsApp, sendText, jidToPhone, engineInstalled,
 } from '../lib/whatsapp.js';
 
 const router = Router();
@@ -37,6 +37,10 @@ function sessionView(s) {
     last_error: s?.last_error || null,
     connected_at: s?.connected_at || null,
     enabled: getSetting('whatsapp_enabled', false) === true,
+    // Whether the optional WhatsApp engine is installed on this server. The web
+    // UI uses this to show "install it on the office computer" instead of a Connect
+    // button on machines that aren't the designated WhatsApp host.
+    engine_installed: engineInstalled(),
   };
 }
 
@@ -47,6 +51,14 @@ router.get('/status', (req, res) => {
 
 // ---------- START / ENABLE + begin pairing (owner) ----------
 router.post('/start', requireOwner, async (req, res) => {
+  // WhatsApp is installed only on the office "main" computer, on purpose. If the
+  // engine isn't present, say so clearly instead of failing with a cryptic
+  // "module not found" — and don't flip the flag on.
+  if (!engineInstalled()) {
+    return res.status(400).json({
+      error: 'WhatsApp engine is not installed on this server. On the office computer, run: npm run whatsapp:install — then try Connect again.',
+    });
+  }
   setSetting('whatsapp_enabled', true);
   setSessionState(db, { status: 'connecting', last_error: null, qr_code: null });
   logAudit({ action: 'WHATSAPP_START', user: req.user, entity_type: 'whatsapp', entity_id: 'default', ip: req.ip });

@@ -16,6 +16,7 @@
     "build": "npm --prefix client run build",
     "setup": "npm install && npm --prefix client install && npm --prefix client run build && node server/seed.js",
     "install-autostart": "node scripts/install-autostart.js",
+    "whatsapp:install": "npm install --no-save baileys@^6.7.23 qrcode@^1.5.4 pino@^9.14.0",
     "app": "electron .",
     "app:rebuild": "electron-rebuild -f -w better-sqlite3 && codesign --force --sign - node_modules/better-sqlite3/build/Release/better_sqlite3.node",
     "icons": "electron desktop/make-icon.js",
@@ -28,14 +29,11 @@
     "@capacitor/barcode-scanner": "1.0.4",
     "@capacitor/core": "^6.2.1",
     "@capacitor/preferences": "^6.0.4",
-    "baileys": "^6.7.23",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.10.0",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "multer": "^2.1.1",
-    "pino": "^9.14.0",
-    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {

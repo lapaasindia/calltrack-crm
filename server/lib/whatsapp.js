@@ -15,9 +15,27 @@
 //    fuzzy LIKE. A chat is linked to an EXISTING lead by phone; it NEVER
 //    auto-creates a lead (that's an explicit promote action in the route).
 
+import { createRequire } from 'node:module';
 import { normalizePhone } from './phone.js';
 import { nowUtc } from './istTime.js';
 import { recalcLeadScore } from './scoring.js';
+
+const _require = createRequire(import.meta.url);
+
+// Is the optional WhatsApp engine (baileys + qrcode) installed on THIS machine?
+// WhatsApp is a deliberate install on the office "main" computer only
+// (`npm run whatsapp:install`); it is NOT a default dependency, so on every other
+// install these resolve-throws -> false and the inbox stays unavailable. We use
+// require.resolve so this only checks presence and never loads/executes baileys.
+export function engineInstalled() {
+  try {
+    _require.resolve('baileys');
+    _require.resolve('qrcode');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const SESSION_ID = 'default';
 const AUTH_SUBDIR = '.whatsapp-auth';

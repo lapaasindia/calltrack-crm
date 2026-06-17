@@ -926,16 +926,23 @@ export default function Settings() {
             </div>
           </div>
         )}
+        {wa && wa.engine_installed === false && (
+          <p style={{ color: 'var(--ink-soft)', fontSize: 13, background: 'var(--bg-soft, rgba(0,0,0,0.04))', padding: 10, borderRadius: 8 }}>
+            The WhatsApp engine isn’t installed on this computer. WhatsApp is meant to run on the{' '}
+            <b>main office computer only</b> — install it there with <code>npm run whatsapp:install</code>,
+            then reload this page. Leaving it off means no one can run WhatsApp from this machine.
+          </p>
+        )}
         {wa?.last_error && wa?.status === 'error' && (
           <p style={{ color: 'var(--red)', fontSize: 13 }}>
-            {wa.last_error.includes('unavailable')
-              ? 'The WhatsApp library isn’t installed on this computer yet. Run npm install, then start again.'
+            {wa.last_error.includes('unavailable') || wa.last_error.includes('not installed')
+              ? 'The WhatsApp engine isn’t installed on this computer. Run npm run whatsapp:install on the office computer, then try again.'
               : wa.last_error}
           </p>
         )}
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {wa?.status !== 'connected' && (
+          {wa?.status !== 'connected' && wa?.engine_installed !== false && (
             <button className="btn green" onClick={waStart}>
               {wa?.status === 'qr_pending' ? 'Restart pairing' : 'Connect WhatsApp'}
             </button>
