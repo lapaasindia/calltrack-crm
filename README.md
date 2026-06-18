@@ -14,14 +14,18 @@ Built for small sales/calling teams (2–15 callers + a manager): every call log
 
 ## 📥 Download
 
-**Latest version: v1.2.0** — these links always point to the newest release:
+**Latest version: v1.2.1** — these links always point to the newest release:
 
 | Platform | Download |
 |---|---|
-| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM 1.2.0 — mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.2.0-mac-arm64.dmg) |
-| **Mac** (Intel) | [CallTrack-CRM 1.2.0 — mac-x64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.2.0-mac-x64.dmg) |
-| **Windows** 10/11 (64-bit) | [CallTrack-CRM 1.2.0 Setup — win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.2.0-win-x64.exe) |
-| **Android** call-capture app | [CallTrack-CRM 1.2.0 — android.apk](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.2.0-android.apk) |
+| **Mac** (Apple Silicon — M1/M2/M3/M4) | [CallTrack-CRM 1.2.1 — mac-arm64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.2.1-mac-arm64.dmg) |
+| **Mac** (Intel) | [CallTrack-CRM 1.2.1 — mac-x64.dmg](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-1.2.1-mac-x64.dmg) |
+| **Windows** 10/11 (64-bit) | [CallTrack-CRM 1.2.1 Setup — win-x64.exe](https://github.com/lapaasindia/calltrack-crm/releases/latest/download/CallTrack-CRM-Setup-1.2.1-win-x64.exe) |
+| **Android** call-capture app | [CallTrack-CRM 1.2.0 — android.apk](https://github.com/lapaasindia/calltrack-crm/releases/download/v1.2.0/CallTrack-CRM-1.2.0-android.apk) |
+
+> Desktop apps (Mac + Windows) are **v1.2.1** — the latest, with the white-screen and
+> report-download fixes. The **Android** call-capture app is still **v1.2.0**; it is
+> rebuilt separately and the link above points to the pinned v1.2.0 asset.
 
 **📱 Android call-capture app** (optional): once the desktop app is running, install
 it on callers' Android phones from `http://<office-server>:3000/download/calltrack.apk`
