@@ -4,6 +4,7 @@ import { api, fmtDateTime } from './api.js';
 import { isAdmin, isOwner } from './permissions.js';
 import Login from './pages/Login.jsx';
 import ForcePasswordChange from './pages/ForcePasswordChange.jsx';
+import ErrorBoundary from './ErrorBoundary.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Today from './pages/Today.jsx';
 import Leads from './pages/Leads.jsx';
@@ -242,6 +243,7 @@ export default function App() {
           waUnread={waUnread} waEnabled={waEnabled}
           notifs={notifs} onReadAll={markAllRead} onLogout={logout} />
         <main className="main">
+          <ErrorBoundary key={location.pathname}>
           <Routes>
             <Route path="/" element={admin ? <Dashboard /> : <Today />} />
             <Route path="/today" element={<Today />} />
@@ -270,6 +272,7 @@ export default function App() {
             {owner && <Route path="/settings" element={<Settings />} />}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </ErrorBoundary>
         </main>
         <Toast toast={toast} />
         <CurrentWorkWidget />

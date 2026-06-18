@@ -39,6 +39,28 @@ export default function Reports() {
 
   const csv = (path) => `${path}?from=${from}&to=${to}&format=csv`;
 
+  // Download via fetch + blob, NOT a plain <a href> navigation: the desktop app
+  // blocks in-window navigations to /api (security 'will-navigate'), which is
+  // why the old links did nothing there. A blob download behaves the same in the
+  // browser, the desktop app, and the WebView.
+  const downloadCsv = async (path, name) => {
+    try {
+      const res = await fetch(csv(path), { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}-${from}-to-${to}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) {
+      alert(`Could not download the CSV — ${e.message}`);
+    }
+  };
+
   return (
     <>
       <div className="page-title"><h1>Reports</h1></div>
@@ -118,7 +140,7 @@ export default function Reports() {
 
       <div className="card">
         <h2>🔻 Funnel ({funnel?.period?.from} → {funnel?.period?.to})
-          <a className="btn small secondary" style={{ float: 'right' }} href={csv('/api/reports/funnel')}>CSV</a></h2>
+          <button className="btn small secondary" style={{ float: 'right' }} onClick={() => downloadCsv('/api/reports/funnel', 'funnel')}>CSV</button></h2>
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={funnel?.rows || []} margin={{ top: 5, right: 10, bottom: 0, left: -18 }}>
             <XAxis dataKey="stage" tick={{ fontSize: 11 }} />
@@ -133,7 +155,7 @@ export default function Reports() {
 
       <div className="card">
         <h2>💰 Revenue by product
-          <a className="btn small secondary" style={{ float: 'right' }} href={csv('/api/reports/revenue-by-product')}>CSV</a></h2>
+          <button className="btn small secondary" style={{ float: 'right' }} onClick={() => downloadCsv('/api/reports/revenue-by-product', 'revenue-by-product')}>CSV</button></h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
           <ResponsiveContainer width={220} height={200}>
             <PieChart>
@@ -163,7 +185,7 @@ export default function Reports() {
 
       <div className="card">
         <h2>📣 Lead sources
-          <a className="btn small secondary" style={{ float: 'right' }} href={csv('/api/reports/sources')}>CSV</a></h2>
+          <button className="btn small secondary" style={{ float: 'right' }} onClick={() => downloadCsv('/api/reports/sources', 'lead-sources')}>CSV</button></h2>
         <div className="table-wrap">
           <table className="data">
             <thead><tr><th>Source</th><th className="num">Leads</th><th className="num">Contacted</th>
@@ -186,7 +208,7 @@ export default function Reports() {
 
       <div className="card">
         <h2>👥 Agent activity by day
-          <a className="btn small secondary" style={{ float: 'right' }} href={csv('/api/reports/agent-daily')}>CSV</a></h2>
+          <button className="btn small secondary" style={{ float: 'right' }} onClick={() => downloadCsv('/api/reports/agent-daily', 'agent-activity')}>CSV</button></h2>
         <div className="table-wrap">
           <table className="data">
             <thead><tr><th>Day</th><th>Agent</th><th className="num">Calls</th><th className="num">Connects</th>
