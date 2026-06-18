@@ -4,11 +4,13 @@
 //  - join: connects to the host computer's address over the office network.
 // Everything stays on the local machines — no cloud anywhere.
 import {
-  app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, powerSaveBlocker, clipboard,
+  app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, powerSaveBlocker, clipboard, session,
 } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { decideNavigation, isSafeExternalScheme } from './lib/navigation.js';
+import { dedupeFilename } from './lib/downloads.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,14 +50,63 @@ async function isCallTrack(url) {
 // Only hand SAFE schemes to the OS shell. Renderer content (which over plain
 // http join mode could be MITM'd, or could carry a user-set meeting_url) must
 // never be able to launch file:, smb:/UNC, or custom protocols like ms-msdt:
-// that turn a link into native execution (audit H-5).
-const SAFE_EXTERNAL_SCHEME = /^(https?|mailto|tel):/i;
+// that turn a link into native execution (audit H-5). The scheme allowlist
+// lives in ./lib/navigation.js so it is unit-tested.
 function safeOpenExternal(target) {
-  if (SAFE_EXTERNAL_SCHEME.test(String(target || ''))) {
+  if (isSafeExternalScheme(target)) {
     shell.openExternal(target).catch(() => {});
   } else {
     console.warn('[calltrack] blocked unsafe external URL:', target);
   }
+}
+
+// Where downloads (the report CSV exports) are saved. The desktop smoke test
+// overrides this; otherwise the OS Downloads folder, falling back to temp if it
+// can't be resolved (locked-down / OneDrive-redirected Windows profiles can
+// make getPath throw).
+function downloadsDir() {
+  if (process.env.CALLTRACK_SMOKE_DOWNLOAD_DIR) return process.env.CALLTRACK_SMOKE_DOWNLOAD_DIR;
+  // getPath can throw on locked-down / OneDrive-redirected profiles; try each
+  // in turn and fall back to USER_DATA (already resolved at boot) so this can
+  // never throw out of the synchronous will-download handler before setSavePath.
+  for (const key of ['downloads', 'temp']) {
+    try { return app.getPath(key); } catch { /* try next */ }
+  }
+  return USER_DATA;
+}
+
+// Save blob/file downloads straight to the OS Downloads folder with a
+// non-colliding, cross-platform-safe name, then reveal them — identical on
+// Windows and macOS, instead of Electron's version-dependent default Save
+// dialog. The client (Reports.jsx) downloads CSVs via fetch->Blob->a[download],
+// which fires this on both the desktop app and the LAN browser.
+//
+// CRITICAL: this callback must be SYNCHRONOUS up to item.setSavePath() — if any
+// await runs first, Electron falls back to the Save As dialog or ignores the
+// path. So the dedupe uses fs.existsSync, never fs.promises. Registered exactly
+// ONCE (boot() is re-entrant) on the shared default session.
+let downloadHandlerInstalled = false;
+function installDownloadHandler() {
+  if (downloadHandlerInstalled) return;
+  downloadHandlerInstalled = true;
+  session.defaultSession.on('will-download', (event, item) => {
+    const dir = downloadsDir();
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* best effort */ }
+    const name = dedupeFilename(item.getFilename() || 'download', (n) => fs.existsSync(path.join(dir, n)));
+    const savePath = path.join(dir, name);
+    item.setSavePath(savePath);
+    item.once('done', (e, state) => {
+      if (state === 'completed') {
+        try { shell.showItemInFolder(savePath); } catch { /* best effort */ }
+      } else if (state === 'interrupted') {
+        try {
+          dialog.showMessageBox(mainWindow, {
+            type: 'error', message: 'Download failed', detail: `Could not save ${name}.`,
+          });
+        } catch { /* ignore */ }
+      } // 'cancelled' -> silent
+    });
+  });
 }
 
 function createMainWindow(url) {
@@ -77,12 +128,10 @@ function createMainWindow(url) {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (e, target) => {
-    if (!target.startsWith(url) && !target.startsWith('http://localhost') && !target.startsWith('http://127.0.0.1')) {
-      const cfg = readConfig();
-      if (cfg?.mode !== 'join' || !target.startsWith(cfg.serverUrl)) {
-        e.preventDefault();
-        safeOpenExternal(target);
-      }
+    const { cancel, openExternal } = decideNavigation({ target, windowUrl: url, config: readConfig() });
+    if (cancel) {
+      e.preventDefault();
+      if (openExternal) safeOpenExternal(target);
     }
   });
 
@@ -301,6 +350,53 @@ ipcMain.handle('setup:restore', async () => {
   return { ok: true, file: path.basename(filePaths[0]) };
 });
 
+// ---------- desktop smoke (npm run test:desktop) ----------
+// Loads a tiny local page served by scripts/desktop-smoke.mjs and proves BOTH
+// download paths the app relies on actually save a file via installDownloadHandler:
+//  (1) main-process webContents.downloadURL, and
+//  (2) the REAL client path fetch -> Blob -> a[download].click() (the path that
+//      was broken in the field).
+// ABI-safe: never boots host mode, so it never loads better-sqlite3 inside
+// Electron. Exits 0 on success, 1 on failure.
+async function waitForFiles(dir, prefixes, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const seen = {};
+  for (;;) {
+    let files = [];
+    try { files = fs.readdirSync(dir); } catch { /* dir not there yet */ }
+    for (const p of prefixes) seen[p] = files.some((f) => f.startsWith(p));
+    if (prefixes.every((p) => seen[p]) || Date.now() > deadline) return seen;
+    await new Promise((r) => { setTimeout(r, 150); });
+  }
+}
+
+async function runSmoke() {
+  const url = process.env.CALLTRACK_SMOKE_URL.replace(/\/$/, '');
+  const dir = downloadsDir();
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  let code = 1;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    await win.loadURL(url);
+    win.webContents.downloadURL(`${url}/export.csv`); // (1) main-process download
+    await win.webContents.executeJavaScript( // (2) the real client blob download
+      "(async () => { const r = await fetch('/export.csv'); const b = await r.blob();"
+      + ' const a = document.createElement(\'a\'); a.href = URL.createObjectURL(b);'
+      + " a.download = 'smoke-renderer.csv'; document.body.appendChild(a); a.click(); a.remove(); })()",
+    );
+    const seen = await waitForFiles(dir, ['export', 'smoke-renderer'], 8000);
+    console.log(`[smoke] files seen: ${JSON.stringify(seen)}`);
+    code = Object.values(seen).every(Boolean) ? 0 : 1;
+  } catch (err) {
+    console.log(`[smoke] error: ${err && err.message}`);
+  } finally {
+    app.exit(code);
+  }
+}
+
 // ---------- app lifecycle ----------
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -312,7 +408,12 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    installDownloadHandler();
     buildMenu();
+    // Opt-in desktop smoke (npm run test:desktop): prove the download path works
+    // in a real Electron launch WITHOUT booting host mode (which would load
+    // better-sqlite3 built for the Node ABI inside Electron and crash).
+    if (process.env.CALLTRACK_SMOKE_URL) { runSmoke(); return; }
     boot();
     // Auto-setup hook for automated testing.
     if (process.env.CALLTRACK_AUTOSETUP === 'host' && !readConfig()) {

@@ -12,7 +12,8 @@
     "start": "node server/index.js",
     "seed": "node server/seed.js",
     "restore-cloud": "node scripts/restore-cloud.js",
-    "test": "CRM_ADMIN_PASSWORD=admin123 node --test server/test/*.test.js",
+    "test": "CRM_ADMIN_PASSWORD=admin123 node --test server/test/*.test.js desktop/lib/*.test.js",
+    "test:desktop": "node scripts/desktop-smoke.mjs",
     "build": "npm --prefix client run build",
     "setup": "npm install && npm --prefix client install && npm --prefix client run build && node server/seed.js",
     "install-autostart": "node scripts/install-autostart.js",
@@ -41,8 +42,8 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.1",
-    "electron": "^42.4.1",
-    "electron-builder": "^26.15.3"
+    "electron": "^36.9.5",
+    "electron-builder": "^25.1.8"
   },
   "overrides": {
     "form-data": ">=4.0.6"
@@ -58,10 +59,12 @@
     "files": [
       "desktop/**/*",
       "!desktop/make-icon.js",
+      "!desktop/lib/*.test.js",
       "server/**/*",
       "!server/test/**",
       "client/dist/**/*",
-      "scripts/**/*"
+      "scripts/**/*",
+      "!scripts/desktop-smoke.mjs"
     ],
     "asarUnpack": [
       "**/*.node"

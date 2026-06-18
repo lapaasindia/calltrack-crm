@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Fast, headless, pure-Node: server logic + the desktop navigation/download
+  # libs (desktop/lib/*.test.js). No Electron, no display.
+  test:
+    name: Unit tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # Proves the report-CSV download path works in the REAL Electron shell on
+  # each OS the app ships to. Launches the app, triggers the actual client
+  # fetch->Blob->a[download].click() download, asserts a file lands. Opt-in
+  # (test:desktop), kept out of the fast job because it needs an Electron binary.
+  desktop-smoke:
+    name: Desktop smoke (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:desktop
+        timeout-minutes: 5

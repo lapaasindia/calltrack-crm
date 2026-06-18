@@ -39,10 +39,12 @@ export default function Reports() {
 
   const csv = (path) => `${path}?from=${from}&to=${to}&format=csv`;
 
-  // Download via fetch + blob, NOT a plain <a href> navigation: the desktop app
-  // blocks in-window navigations to /api (security 'will-navigate'), which is
-  // why the old links did nothing there. A blob download behaves the same in the
-  // browser, the desktop app, and the WebView.
+  // Download via fetch + Blob, not a plain <a href> to the CSV endpoint. The
+  // blob path downloads consistently across the browser, the desktop app, and
+  // the Android WebView, and lets us set a clear, date-stamped filename. In the
+  // desktop app the shell's will-download handler then saves it to the OS
+  // Downloads folder (sanitized + de-duped) and reveals it — the old <a href>
+  // links had no such handler, so they saved nowhere.
   const downloadCsv = async (path, name) => {
     try {
       const res = await fetch(csv(path), { credentials: 'same-origin' });
