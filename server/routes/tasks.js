@@ -259,7 +259,15 @@ router.patch('/:id', (req, res) => {
 router.delete('/:id', (req, res) => {
   const task = loadTask(req, res);
   if (!task) return undefined;
-  db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+  // Detach rows that reference this task (time blocks + meeting decisions/actions
+  // promoted to it) before deleting — otherwise their foreign keys (foreign_keys
+  // =ON) make the delete fail. One transaction so it's all-or-nothing.
+  db.transaction(() => {
+    db.prepare('UPDATE time_blocks SET linked_task_id = NULL WHERE linked_task_id = ?').run(task.id);
+    db.prepare('UPDATE meeting_decisions SET task_id = NULL WHERE task_id = ?').run(task.id);
+    db.prepare('UPDATE meeting_actions SET task_id = NULL WHERE task_id = ?').run(task.id);
+    db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+  })();
   return res.json({ ok: true });
 });
 

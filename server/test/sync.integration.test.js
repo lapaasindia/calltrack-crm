@@ -116,6 +116,53 @@ test('reinstall re-sync: identical batch is all duplicates, zero new rows', asyn
   assert.equal(lead.data.calls.find((c) => c.duration_seconds === 0).disposition, 'not_picked');
 });
 
+// Helper: mint a fresh pairing code for user 1 and pair with a given android_id.
+const pairPhone = async (androidId, deviceName) => {
+  const code = await api('/api/devices/pairing-code', {
+    method: 'POST', cookie: adminCookie, body: { user_id: 1 },
+  });
+  return api('/api/auth/pair', {
+    method: 'POST', body: { code: code.data.code, device_name: deviceName, android_id: androidId },
+  });
+};
+
+test('multi-device: reinstall keeps device_id (old token dies), but a 2nd phone stays separate', async () => {
+  // A lead + a single call both phones will report (same phone+ts+lead).
+  const mdLead = await api('/api/leads', {
+    method: 'POST', cookie: adminCookie, body: { name: 'MultiDevice Lead', phone: '9000000001', assigned_to: 1 },
+  });
+  const mdLeadId = mdLead.data.id;
+  const ts = Date.now() - 5000000;
+  const batch = { calls: [{ call_log_ts: ts, phone: '9000000001', direction: 'outgoing', duration_seconds: 30 }] };
+
+  // Phone A pairs and syncs the call → attached.
+  const a1 = await pairPhone('PHONE_A', 'Phone A');
+  assert.equal(a1.status, 200);
+  const deviceA = a1.data.device_id;
+  const syncA1 = await api('/api/sync/calls', { method: 'POST', token: a1.data.token, body: batch });
+  assert.equal(syncA1.data.results[0].status, 'attached');
+
+  // Reinstall: re-pair the SAME android_id with a NEW code.
+  const a2 = await pairPhone('PHONE_A', 'Phone A reinstalled');
+  assert.equal(a2.data.device_id, deviceA, 'reinstall reuses the same device_id');
+  // The old token must no longer authenticate.
+  const oldTok = await api('/api/sync/status', { token: a1.data.token });
+  assert.equal(oldTok.status, 401, 'old token revoked after re-pair');
+  // Re-syncing the same call from the same device → duplicate (reinstall dedupe holds).
+  const syncA2 = await api('/api/sync/calls', { method: 'POST', token: a2.data.token, body: batch });
+  assert.equal(syncA2.data.results[0].status, 'duplicate');
+
+  // A DIFFERENT phone (android_id B), same user, same call → NOT dropped (distinct device_id).
+  const b = await pairPhone('PHONE_B', 'Phone B');
+  assert.notEqual(b.data.device_id, deviceA, 'a second phone gets a distinct device_id');
+  const syncB = await api('/api/sync/calls', { method: 'POST', token: b.data.token, body: batch });
+  assert.equal(syncB.data.results[0].status, 'attached', "2nd phone's call is not swallowed as a duplicate");
+
+  // The lead now has both phones' calls, not one.
+  const after = await api(`/api/leads/${mdLeadId}`, { cookie: adminCookie });
+  assert.equal(after.data.calls.length, 2);
+});
+
 test('recording upload matches the connected call via filename number', async () => {
   const ts = BATCH.calls[0].call_log_ts;
   const d = new Date(ts + 5.5 * 3600000); // IST wall time for the filename

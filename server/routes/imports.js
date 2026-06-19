@@ -14,6 +14,12 @@ router.post('/', (req, res) => {
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
   if (!rows.length) return res.status(400).json({ error: 'No rows to import' });
   if (rows.length > 20000) return res.status(400).json({ error: 'Too many rows (max 20,000 per import)' });
+  // Only lead spreadsheets — reject anything else (the client gates too, but the
+  // API must not trust a hand-crafted request).
+  const ext = String(req.body.filename || '').split('.').pop().toLowerCase();
+  if (!['csv', 'xlsx', 'xls'].includes(ext)) {
+    return res.status(400).json({ error: 'Unsupported file type — only CSV/Excel imports are allowed' });
+  }
 
   const defaultSource = String(req.body.default_source || 'import').trim() || 'import';
 

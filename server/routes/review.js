@@ -36,8 +36,8 @@ function mergeCapturedIntoLead(leadId, phone) {
       c.duration_seconds
     );
     const callRow = db.prepare(
-      "SELECT id FROM calls WHERE user_id = ? AND call_log_ts = ? AND lead_id = ? AND source = 'mobile'"
-    ).get(c.user_id, c.call_log_ts, leadId);
+      "SELECT id FROM calls WHERE device_id = ? AND user_id = ? AND call_log_ts = ? AND lead_id = ? AND source = 'mobile'"
+    ).get(c.device_id, c.user_id, c.call_log_ts, leadId);
     db.prepare("UPDATE captured_calls SET status = 'lead_created', created_lead_id = ? WHERE id = ?")
       .run(leadId, c.id);
     if (callRow) {

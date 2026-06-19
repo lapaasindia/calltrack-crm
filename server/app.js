@@ -217,6 +217,12 @@ export function createApp() {
   // eslint-disable-next-line no-unused-vars
   app.use('/api', (err, req, res, next) => {
     console.error(err);
+    // A foreign-key violation means the row is still referenced elsewhere —
+    // surface that as a clear 409 instead of an opaque 500 so a missed detach
+    // (e.g. a new table referencing projects) degrades gracefully.
+    if (err && err.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+      return res.status(409).json({ error: 'Still referenced by other records — remove or detach those first.' });
+    }
     res.status(500).json({ error: 'Server error' });
   });
 

@@ -204,9 +204,15 @@ router.delete('/:id', (req, res) => {
   }
   const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
-  // Detach tasks (keep them; they live in the Today queue) before removing.
-  db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(project.id);
-  db.prepare('DELETE FROM projects WHERE id = ?').run(project.id);
+  // Detach EVERYTHING that references the project (tasks AND meetings) before
+  // removing it — otherwise the meetings.project_id foreign key (foreign_keys=ON)
+  // throws and the delete fails with a generic "Server error". One transaction
+  // so a half-detached project can't be left behind.
+  db.transaction(() => {
+    db.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').run(project.id);
+    db.prepare('UPDATE meetings SET project_id = NULL WHERE project_id = ?').run(project.id);
+    db.prepare('DELETE FROM projects WHERE id = ?').run(project.id);
+  })();
   logAudit({
     action: 'PROJECT_DELETE', user: req.user, entity_type: 'project',
     entity_id: project.id, details: { name: project.name }, ip: req.ip,

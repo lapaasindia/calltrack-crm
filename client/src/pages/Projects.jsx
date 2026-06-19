@@ -15,6 +15,14 @@ function StatusBadge({ status }) {
   return <span className={`badge ${STATUS_BADGE[status] || 'pending'}`}>{status}</span>;
 }
 
+// Derive shown progress from completed tasks so the bar matches the
+// "done_count/task_count tasks done" line. Projects with no tasks fall back to
+// the manually-entered progress value.
+function taskProgress(p) {
+  if (p.task_count > 0) return Math.round((p.done_count / p.task_count) * 100);
+  return p.progress || 0;
+}
+
 function Progress({ value }) {
   const pct = Math.max(0, Math.min(100, value || 0));
   return (
@@ -150,7 +158,7 @@ function ProjectDetails({ project, canDelete, onClose, onChanged }) {
         {project.budget_paise > 0 && <span className="tl-meta">Budget: {rupees(project.budget_paise)}</span>}
       </div>
       {project.description && <p style={{ fontSize: 13 }}>{project.description}</p>}
-      <Progress value={project.progress} />
+      <Progress value={taskProgress(detail || project)} />
 
       <div className="field" style={{ marginTop: 12 }}>
         <label>Add a task</label>
@@ -249,7 +257,7 @@ export default function Projects() {
               </div>
               {p.start_date && <div className="tl-meta">Start: {fmtDate(p.start_date)}</div>}
               <div className="tl-meta">{p.done_count}/{p.task_count} tasks done</div>
-              <Progress value={p.progress} />
+              <Progress value={taskProgress(p)} />
             </div>
           ))}
         </div>

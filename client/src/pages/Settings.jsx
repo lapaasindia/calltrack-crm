@@ -173,7 +173,10 @@ function UserModal({ user: editing, onClose, onSaved }) {
         <div className="field">
           <label>Role{isSelf && ' (you can’t change your own)'}</label>
           <select value={form.role} onChange={set('role')} disabled={isSelf}>
-            {ROLES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+            {/* Only an owner can grant owner-tier roles — hiding them mirrors the
+                server guard so a non-owner never picks a role that 403s. */}
+            {ROLES.filter((r) => isOwner(me.role) || !isOwner(r))
+              .map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
           </select>
         </div>
         <div className="field">

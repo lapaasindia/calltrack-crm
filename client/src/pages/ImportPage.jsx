@@ -40,6 +40,10 @@ function autoMap(headers) {
   return map;
 }
 
+// Only these are real lead files. The <input accept> is just a dialog hint a
+// user can bypass ("All Files") — this is the actual gate.
+const ALLOWED_EXT = ['csv', 'xlsx', 'xls'];
+
 // Strip BOM (else it glues to the first header and breaks mapping) and decode.
 async function parseFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
@@ -51,6 +55,9 @@ async function parseFile(file) {
     const rows = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: '' });
     return { headers: rows.length ? Object.keys(rows[0]) : [], rows };
   }
+  // Anything that isn't a spreadsheet must be a real CSV — never feed a PDF/
+  // image/etc. to the CSV parser (it would happily return garbage "rows").
+  if (ext !== 'csv') throw new Error('Unsupported file type — use CSV or Excel (.csv, .xlsx, .xls)');
   let buf = new Uint8Array(await file.arrayBuffer());
   if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) buf = buf.slice(3);
   let text;
@@ -87,6 +94,12 @@ export default function ImportPage() {
 
   const onFile = async (f) => {
     if (!f) return;
+    // Real gate (the dialog's accept= is bypassable and ignored on drag-drop).
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (!f.name.includes('.') || !ALLOWED_EXT.includes(ext)) {
+      showToast('Unsupported file type. Upload a .csv, .xlsx, or .xls file.', 'error');
+      return;
+    }
     setFile(f);
     setBusy(true);
     try {

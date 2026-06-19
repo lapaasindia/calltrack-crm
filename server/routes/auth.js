@@ -95,13 +95,43 @@ router.post('/pair', (req, res) => {
     db.prepare('UPDATE pairing_codes SET used_at = ? WHERE id = ?').run(nowUtc(), pc.id);
     // Tokens expire (audit M-1) — re-pairing is one QR scan. 90-day TTL.
     const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
-    const info = db.prepare(
-      `INSERT INTO device_tokens (user_id, device_name, android_id, token_hash, paired_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(pc.user_id, deviceName, req.body.android_id || null, hashToken(token), nowUtc(), expiresAt);
+    // Ignore the "unknown" sentinel (the app returns it when ANDROID_ID is null)
+    // and blanks — otherwise two unidentifiable phones would collapse onto one
+    // device row and start colliding again.
+    const rawAndroidId = req.body.android_id;
+    const androidId = (rawAndroidId && rawAndroidId !== 'unknown') ? rawAndroidId : null;
+    // Reuse this physical phone's existing device row (same user + android_id)
+    // instead of accumulating a new one on every re-pair. This keeps device_id
+    // STABLE across reinstalls, so the device-scoped call dedupe (migration 015)
+    // still suppresses a re-synced history — while two DIFFERENT phones keep
+    // distinct device_ids. Only reuse a still-active row (a REVOKED device forks
+    // a fresh row so the revocation record survives); ORDER BY id DESC keeps the
+    // pick deterministic if a legacy DB holds duplicate rows for this phone.
+    const existing = androidId
+      ? db.prepare(
+        `SELECT id FROM device_tokens
+         WHERE user_id = ? AND android_id = ? AND revoked_at IS NULL
+         ORDER BY id DESC LIMIT 1`
+      ).get(pc.user_id, androidId)
+      : null;
+    let deviceId;
+    if (existing) {
+      db.prepare(
+        `UPDATE device_tokens
+           SET device_name = ?, token_hash = ?, paired_at = ?, expires_at = ?, revoked_at = NULL
+         WHERE id = ?`
+      ).run(deviceName, hashToken(token), nowUtc(), expiresAt, existing.id);
+      deviceId = existing.id;
+    } else {
+      const info = db.prepare(
+        `INSERT INTO device_tokens (user_id, device_name, android_id, token_hash, paired_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(pc.user_id, deviceName, androidId, hashToken(token), nowUtc(), expiresAt);
+      deviceId = info.lastInsertRowid;
+    }
     const user = db.prepare('SELECT id, username, full_name, role FROM users WHERE id = ?')
       .get(pc.user_id);
-    return { deviceId: info.lastInsertRowid, user };
+    return { deviceId, user };
   })();
 
   if (!result) return res.status(401).json({ error: 'Invalid or expired pairing code' });

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso } from '../api.js';
+import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso, utcIsoToDtLocal } from '../api.js';
 import { useApp } from '../App.jsx';
 import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal,
   ScoreBadge, AiIntelPanel, TranscriptToggle } from '../components.jsx';
@@ -352,19 +352,22 @@ function GenerateInvoiceModal({ lead, onClose }) {
 
 function FollowUpModal({ lead, onClose, onSaved }) {
   const { showToast } = useApp();
-  const [dueAt, setDueAt] = useState('');
-  const [reason, setReason] = useState('');
+  const existing = lead.follow_up;
+  // Reschedule pre-fills the current due date/reason so the admin sees what
+  // they're changing (and isn't forced to retype the time from scratch).
+  const [dueAt, setDueAt] = useState(existing ? utcIsoToDtLocal(existing.due_at) : '');
+  const [reason, setReason] = useState(existing?.reason || '');
   const save = async () => {
     try {
       await api.put(`/api/leads/${lead.id}/follow-up`, {
         due_at: dtLocalToUtcIso(dueAt), reason: reason || 'Follow-up',
       });
-      showToast('Follow-up scheduled ✓');
+      showToast(existing ? 'Follow-up rescheduled ✓' : 'Follow-up scheduled ✓');
       onSaved(); onClose();
     } catch (err) { showToast(err.message, 'error'); }
   };
   return (
-    <Modal title="Schedule follow-up" onClose={onClose}>
+    <Modal title={existing ? 'Reschedule follow-up' : 'Schedule follow-up'} onClose={onClose}>
       <div className="field">
         <label>When</label>
         <input type="datetime-local" value={dueAt} onChange={(e) => setDueAt(e.target.value)} autoFocus />
@@ -375,7 +378,7 @@ function FollowUpModal({ lead, onClose, onSaved }) {
       </div>
       <div className="modal-actions">
         <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={!dueAt} onClick={save}>Schedule</button>
+        <button className="btn" disabled={!dueAt} onClick={save}>{existing ? 'Reschedule' : 'Schedule'}</button>
       </div>
     </Modal>
   );
