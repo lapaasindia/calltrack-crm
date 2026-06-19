@@ -40,6 +40,9 @@ export default function Login({ onLogin }) {
         <button className="btn block" disabled={busy || !username || !password}>
           {busy ? 'Logging in…' : 'Log in'}
         </button>
+        <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--ink-soft)', marginTop: 14 }}>
+          v{__APP_VERSION__}
+        </div>
       </form>
     </div>
   );

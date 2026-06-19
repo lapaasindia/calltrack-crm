@@ -54,7 +54,13 @@ import { startWhatsApp } from './lib/whatsapp.js';
 import dbDefault, { getSetting } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const APP_VERSION = '1.2.0';
+// Single source of truth: the root package.json version (so /api/health and the
+// in-app version label never drift from the real release). Read once at load.
+export const APP_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version;
+  } catch { return '0.0.0'; }
+})();
 
 export function lanAddresses() {
   const addrs = [];

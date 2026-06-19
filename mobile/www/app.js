@@ -20,6 +20,10 @@ const store = {
 let cfg = null; // { serverUrl, token, userName }
 const app = document.getElementById('app');
 
+// Shown in the UI so a tester can confirm which build is installed. Keep in step
+// with versionName in mobile/android/app/build.gradle.
+const APP_VERSION = '1.2.1';
+
 function toast(msg, isErr) {
   const t = document.createElement('div');
   t.className = `toast ${isErr ? 'err' : ''}`;
@@ -200,6 +204,7 @@ function renderPairing(error) {
         On the office computer: open CallTrack → <b>Settings → Pair phone</b> →
         pick your name → scan the QR shown there.
       </div>
+      <div class="muted" style="text-align:center;margin-top:20px;font-size:12px;opacity:.65">App version v${APP_VERSION}</div>
     </div>`;
 
   document.getElementById('scan').onclick = async () => {
@@ -427,7 +432,7 @@ async function renderSettings() {
     </div>
     <button class="btn ghost" id="update">Check for app update</button>
     <button class="btn ghost" id="unpair" style="margin-top:10px;color:var(--red)">Disconnect this phone</button>
-    <div class="muted" style="text-align:center;margin-top:16px">CallTrack mobile · ${isNative ? 'device' : 'browser preview'}</div>`;
+    <div class="muted" style="text-align:center;margin-top:16px">CallTrack mobile v${APP_VERSION} · ${isNative ? 'device' : 'browser preview'}</div>`;
   document.getElementById('fix').onclick = () => { route = 'setup'; render(); };
   document.getElementById('unpair').onclick = async () => { if (confirm('Disconnect? Your synced data stays in the CRM.')) unpair(); };
   document.getElementById('update').onclick = async () => {

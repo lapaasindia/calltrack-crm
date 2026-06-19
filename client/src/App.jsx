@@ -133,6 +133,7 @@ function Nav({ user, dueCount, reviewCount, waUnread, waEnabled, notifs, onReadA
           </div>
           {user.role === 'admin' ? 'Admin' : 'Caller'}
           <div><button onClick={onLogout}>Log out</button></div>
+          <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginTop: 8 }}>v{__APP_VERSION__}</div>
         </div>
       </aside>
       <div className="mobile-topbar">
