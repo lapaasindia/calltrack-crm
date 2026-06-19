@@ -28,6 +28,29 @@ function toast(msg, isErr) {
   setTimeout(() => t.remove(), 2800);
 }
 
+// Last-resort white-screen guard — the mobile equivalent of the web app's React
+// ErrorBoundary. If a render or boot error would otherwise leave a blank screen,
+// show a recoverable message with a Reload button instead of a dead page.
+// Strict CSP (audit H-4) allows inline STYLE attributes but not inline scripts,
+// so the Reload handler is bound in JS.
+function showFatal(err) {
+  const msg = (err && (err.message || err.reason || err)) || 'Something went wrong';
+  app.innerHTML = `<div class="empty" style="padding:32px 20px;text-align:center">
+    <div class="big">⚠️</div>
+    <div style="font-weight:700;margin:8px 0">Something went wrong</div>
+    <div style="color:#6b7280;font-size:13px;margin-bottom:14px">Your data is safe — this screen just failed to load.</div>
+    <div style="font-size:12px;color:#b91c1c;white-space:pre-wrap;word-break:break-word;margin-bottom:16px">${escapeHtml(String(msg))}</div>
+    <button class="btn" id="fatal-reload" style="width:auto;margin:0 auto">Reload app</button></div>`;
+  const b = app.querySelector('#fatal-reload');
+  if (b) b.onclick = () => location.reload();
+}
+
+// Safety net for errors outside the render/boot try/catch (event handlers,
+// timers): only step in when the screen is actually blank, so a stray late
+// error can never clobber a working screen.
+window.addEventListener('error', (e) => { if (!app.childElementCount) showFatal(e.error || e.message); });
+window.addEventListener('unhandledrejection', (e) => { if (!app.childElementCount) showFatal(e.reason); });
+
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(`${cfg.serverUrl}${path}`, {
     method,
@@ -522,17 +545,22 @@ function syncLabel() {
 }
 
 async function render() {
-  if (!cfg) return renderPairing();
-  if (route === 'setup') return renderSetup();
-  renderChrome();
-  // refresh review badge opportunistically
-  api('/api/review/summary').then((s) => { lastState = { ...(lastState || {}), reviewCount: s.total };
-    const nb = app.querySelector('[data-route="review"] .nb');
-    if (s.total && !nb) renderChrome(), render(); }).catch(() => {});
-  if (route === 'home') return renderHome();
-  if (route === 'review') return renderReview();
-  if (route === 'whatsapp') return renderWhatsApp();
-  if (route === 'settings') return renderSettings();
+  try {
+    if (!cfg) return await renderPairing();
+    if (route === 'setup') return await renderSetup();
+    renderChrome();
+    // refresh review badge opportunistically
+    api('/api/review/summary').then((s) => { lastState = { ...(lastState || {}), reviewCount: s.total };
+      const nb = app.querySelector('[data-route="review"] .nb');
+      if (s.total && !nb) renderChrome(), render(); }).catch(() => {});
+    if (route === 'home') return await renderHome();
+    if (route === 'review') return await renderReview();
+    if (route === 'whatsapp') return await renderWhatsApp();
+    if (route === 'settings') return await renderSettings();
+  } catch (err) {
+    // A broken screen shows the recoverable error UI instead of blanking.
+    showFatal(err);
+  }
 }
 
 // ===================== BOOT =====================
@@ -564,4 +592,4 @@ async function boot() {
   });
 }
 
-boot();
+boot().catch(showFatal);
