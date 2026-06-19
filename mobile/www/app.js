@@ -143,17 +143,43 @@ async function waPoll() {
 // ===================== PAIRING =====================
 // Returns: { raw } on success, { unavailable:true } if the plugin isn't
 // installed (browser/dev), or null if the user cancelled / scan failed.
+// The Google code scanner (Scanner.scan) runs from a Google Play Services module
+// that is downloaded on FIRST use — it is NOT bundled in the APK. If we call
+// scan() before that module exists, it throws and the scan "silently" fails.
+// So make sure the module is present (installing + waiting for the download to
+// finish) before scanning. Resolves when ready, rejects with a readable reason.
+function ensureScannerModule(Scanner) {
+  if (!Scanner.isGoogleBarcodeScannerModuleAvailable) return Promise.resolve();
+  return Scanner.isGoogleBarcodeScannerModuleAvailable().then(({ available }) => {
+    if (available) return undefined;
+    return new Promise((resolve, reject) => {
+      let handle = null;
+      const cleanup = () => { try { handle && handle.remove && handle.remove(); } catch { /* ignore */ } };
+      // ModuleInstallStatusCodes: 4 = COMPLETED, 5 = CANCELED, 6 = FAILED.
+      Scanner.addListener('googleBarcodeScannerModuleInstallProgress', (e) => {
+        if (e.state === 4) { cleanup(); resolve(); }
+        else if (e.state === 5 || e.state === 6) { cleanup(); reject(new Error('Could not download the QR scanner — check internet, or type the code.')); }
+      }).then((h) => { handle = h; });
+      Scanner.installGoogleBarcodeScannerModule().catch((err) => { cleanup(); reject(err); });
+      setTimeout(() => { cleanup(); reject(new Error('Scanner is taking too long — type the code instead.')); }, 30000);
+    });
+  });
+}
+
 async function scanQr() {
   // @capacitor-mlkit/barcode-scanning (Google ML Kit, registers as 'BarcodeScanner').
   // Free + from Google's Maven — no JitPack token needed by anyone building the app.
   const Scanner = window.Capacitor?.Plugins?.BarcodeScanner;
   if (!Scanner) return { unavailable: true };
   try {
+    await ensureScannerModule(Scanner);
     // Google code scanner UI: no custom camera overlay, returns the scanned codes.
     const res = await Scanner.scan();
     return { raw: res?.barcodes?.[0]?.rawValue || null };
-  } catch {
-    return null; // cancelled, module unavailable, or permission denied → manual entry
+  } catch (e) {
+    // Surface the real reason (permission denied, no Play Services, module
+    // download failed…) instead of a generic "type the code".
+    return { error: (e && e.message) || 'Could not open the camera scanner' };
   }
 }
 
@@ -178,7 +204,8 @@ function renderPairing(error) {
 
   document.getElementById('scan').onclick = async () => {
     const r = await scanQr();
-    if (r?.unavailable) return toast('Scanner not available — type the code instead', true);
+    if (r?.unavailable) return toast('Scanner not available on this phone — type the code instead', true);
+    if (r?.error) return toast(r.error, true);
     if (!r?.raw) return toast('Scan cancelled — or type the code instead', true);
     try {
       const parsed = JSON.parse(r.raw);
