@@ -270,6 +270,13 @@ CI and docs). Finding ids (`SEC-`, `SCALE-`, `CLIENT-`, `MOB-`, `DESK-`, `DEP-`,
   `docs/SECURITY-REMEDIATION.md` now states the true H-6/M-9 status and carries
   the September 2026 re-audit table; `docs/SECURITY-AUDIT.md` marked historical (DEP-10).
 
+### Deployment (Docker / Coolify)
+- New `Dockerfile` (multi-stage: client build, then a Node 22 + ffmpeg + tini runtime running as the `node` user, all state under `/data`), `.dockerignore`, `docker-compose.yml`, and a CI job that builds the image and checks `/api/health`.
+- `CRM_TRUST_PROXY` (Express `trust proxy`; `1`/`true`, a hop count, or an address list) so `req.ip` and `req.secure` follow the reverse proxy — login/pairing throttles key on the real client, `CRM_SECURE_COOKIES` works behind TLS termination. A boot warning explains the `CRM_SECURE_COOKIES` without `CRM_TRUST_PROXY` misconfiguration.
+- `CRM_PUBLIC_URL` (validated origin-only): first in the pairing-code URL list (`public_url` field added), accepted as an own host for the Drive OAuth redirect, printed and QR-coded in the start-up banner; never reported by `/api/health`.
+- Android app: pairs with any `https://` server (cloud/Coolify), still only private addresses over plain `http://`.
+- README "Deploy on a server (Docker / Coolify)" section; ARCHITECTURE "container" topology.
+
 ### Known follow-ups (deliberately not in this release)
 - **Major upgrades:** Express 5, react-router 7 (clears two remaining moderate
   client advisories), Vite 7/8 + `@vitejs/plugin-react` 5+, React 19, recharts 3,

@@ -1,0 +1,27 @@
+# Build context for the Dockerfile: the image copies only package.json,
+# package-lock.json, .npmrc, server/, scripts/ and client/ (minus its
+# node_modules/dist — both stages install and build their own).
+node_modules
+client/node_modules
+client/dist
+data
+backups
+release
+build/native
+mobile/android
+.git
+.github
+docs/screenshots
+desktop
+*.apk
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.keystore
+*.jks
+*.p12
+*.pem
+.env
+.env.*
+.claude
+.DS_Store

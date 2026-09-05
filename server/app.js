@@ -29,6 +29,7 @@ import { log, requestLogger } from './lib/logger.js';
 import { opsHealth, installProcessGuards } from './lib/ops.js';
 import { drainJobs } from './lib/jobs.js';
 import { startMaintenanceJob } from './lib/maintenance.js';
+import { parsePublicUrl } from './lib/publicUrl.js';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -93,6 +94,21 @@ export function tlsConfig() {
   return null;
 }
 
+// CRM_TRUST_PROXY → Express `trust proxy` (reverse-proxy / container
+// deployments: Coolify + Traefik, nginx, Caddy). Unset/0/false/off → null (the
+// LAN default: headers ignored, req.ip is the socket peer). 1/true → one hop
+// (only the address appended by OUR proxy counts — a client-supplied
+// X-Forwarded-For prefix can neither dodge nor forge the login throttle). A
+// larger number → that many hops; anything else (e.g. "loopback, 10.0.0.0/8")
+// is handed to Express verbatim as a trusted-address list.
+export function trustProxySetting(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (!v || v === '0' || v === 'false' || v === 'off' || v === 'no') return null;
+  if (v === '1' || v === 'true' || v === 'on' || v === 'yes') return 1;
+  if (/^\d+$/.test(v)) return Number(v);
+  return String(raw).trim();
+}
+
 export function createApp() {
   // Session secret: generated once, persisted — regenerating on each boot
   // would log everyone out on every restart.
@@ -109,6 +125,22 @@ export function createApp() {
 
   const app = express();
   app.disable('x-powered-by');
+
+  // Reverse-proxy awareness (see trustProxySetting). With it, req.ip and
+  // req.secure follow X-Forwarded-For / X-Forwarded-Proto from the proxy, so
+  // the login/pair throttles key on the real client and Secure cookies work
+  // behind TLS termination. Logged once so an operator can see what the
+  // process believes.
+  const trustProxy = trustProxySetting(process.env.CRM_TRUST_PROXY);
+  if (trustProxy != null) app.set('trust proxy', trustProxy);
+  log.info({ trust_proxy: trustProxy ?? false, secure_cookies: secureCookies }, 'proxy settings');
+  if (secureCookies && trustProxy == null && !tlsConfig()) {
+    log.warn('CRM_SECURE_COOKIES=true without CRM_TRUST_PROXY or CRM_TLS_*: behind a reverse proxy '
+      + 'the Secure cookie will never be sent and nobody can log in — set CRM_TRUST_PROXY=1');
+  }
+  const pub = parsePublicUrl();
+  if (pub.error) log.warn({ value: process.env.CRM_PUBLIC_URL }, `ignoring ${pub.error}`);
+  else if (pub.origin) log.info({ public_url: pub.origin }, 'public URL');
 
   // Baseline security headers. CSP here is just the clickjacking/abuse floor
   // that never breaks self-contained HTML pages or the SPA; a stricter

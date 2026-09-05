@@ -191,3 +191,28 @@ jobs:
       - run: npx electron --version
       - run: npm run test:desktop
         timeout-minutes: 5
+
+  # The container image must keep building and booting (Dockerfile rot check):
+  # build it — never pushed — start it with a scratch volume and expect
+  # /api/health to answer as CallTrack.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --tag calltrack-crm:ci .
+      - name: Boots and answers /api/health
+        run: |
+          docker run -d --name calltrack -p 3000:3000 -e CRM_ADMIN_PASSWORD=ci-only-password-1 calltrack-crm:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3000/api/health | grep -q '"calltrack-crm"'; then
+              echo "healthy after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container never answered /api/health"
+          docker logs calltrack
+          exit 1
+      - if: always()
+        run: docker rm -f calltrack || true

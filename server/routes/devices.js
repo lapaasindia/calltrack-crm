@@ -6,6 +6,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { isOwner } from '../lib/permissions.js';
 import { nowUtc } from '../lib/istTime.js';
 import { tlsConfig } from '../app.js';
+import { parsePublicUrl } from '../lib/publicUrl.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -59,7 +60,12 @@ router.post('/pairing-code', (req, res) => {
   db.prepare(
     'INSERT INTO pairing_codes (code, user_id, created_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(code, user.id, req.user.id, expiresAt, nowUtc());
-  res.json({ code, expires_at: expiresAt, urls: lanUrls(req), scheme: schemeOf(req) });
+  // Behind a reverse proxy / in a container the interface IPs mean nothing to
+  // a phone; CRM_PUBLIC_URL (validated, origin only) goes FIRST so the QR the
+  // admin shows points at the proxy. LAN addresses follow for office setups.
+  const pub = parsePublicUrl();
+  const urls = pub.origin ? [pub.origin, ...lanUrls(req)] : lanUrls(req);
+  res.json({ code, expires_at: expiresAt, urls, scheme: schemeOf(req), public_url: pub.origin });
 });
 
 router.get('/', (req, res) => {

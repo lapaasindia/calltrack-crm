@@ -225,6 +225,41 @@ Native-module notes (the hard-won kind):
 - The `better-sqlite3` prebuilds for every target (mac arm64/x64, win x64) are staged into `build/native/` by `npm run native` (`scripts/fetch-electron-sqlite.js`; with better-sqlite3 13 these are the N-API prebuilds bundled inside the npm package, so nothing is downloaded), magic-byte checked, load-tested inside the installed Electron, SHA-256-pinned in `build/native/native.lock.json` (committed — the release runner fails on a mismatch) and shipped as `Resources/native`. The repo's own `node_modules` is never modified — never run `dist` or a rebuild in the office LaunchAgent checkout.
 - On Apple Silicon, a locally rebuilt `.node` must be re-signed or macOS kills the process on load.
 
+## Deploy on a server (Docker / Coolify)
+
+The same single process runs as a container for teams that want the CRM reachable
+from anywhere (or hosted on a NAS / VPS) instead of one office computer. The
+repo ships a multi-stage `Dockerfile` (Node 22 + ffmpeg for recording
+transcoding, no whisper), a `docker-compose.yml`, and a CI job that builds and
+boots the image on every push.
+
+```bash
+CRM_ADMIN_PASSWORD='a strong password' docker compose up -d --build
+# → http://localhost:3000  (data in the calltrack-data volume)
+```
+
+**Coolify** (or any Traefik/nginx/Caddy reverse proxy that terminates TLS):
+create an application from this repo with the **Dockerfile** build pack, expose
+port **3000**, health check `GET /api/health`, add a **persistent volume mounted
+at `/data`** (database, backups, recordings, logs, `secret.key`), and set:
+
+| Variable | Value | Why |
+|---|---|---|
+| `CRM_ADMIN_PASSWORD` | a strong password | created on first boot; **never** leave the `admin123` default on an internet-facing instance |
+| `CRM_PUBLIC_URL` | `https://crm.yourcompany.com` | goes first in phone-pairing URLs/QR codes and is accepted for the Google Drive OAuth redirect |
+| `CRM_SECURE_COOKIES` | `true` | the session cookie is only sent over HTTPS |
+| `CRM_TRUST_PROXY` | `1` (image default) | trust `X-Forwarded-*` from the proxy so the login/pairing throttles see the real client IP and Secure cookies work |
+| `CRM_DATA_DIR` / `CRM_BACKUP_DIR` | `/data` / `/data/backups` (image defaults) | everything persistent lives on the volume |
+
+Rules for an internet-exposed instance: **https only** (the image refuses
+nothing, so this is on the proxy), a strong admin password, and phones need the
+1.2.2+ Android app — it pairs with any `https://` server but only with private
+addresses over plain `http://`. `CRM_TRUST_PROXY` must be set whenever a proxy
+sits in front; without it every visitor shares the proxy's IP and five wrong
+passwords from anyone would throttle everyone. Daily backups land in
+`/data/backups` — copy them off the box (the encrypted Google Drive backup works
+here too).
+
 ## Architecture
 
 Single Node.js process: Express API + SQLite (better-sqlite3, WAL) + static React build — wrapped in Electron for the desktop app, or run bare via `npm start`. The same server serves the app windows, browsers, and phones.

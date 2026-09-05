@@ -21,6 +21,7 @@ import {
   buildAuthUrl, exchangeCode,
 } from '../lib/googleDrive.js';
 import { sealSecret } from '../lib/secretBox.js';
+import { parsePublicUrl } from '../lib/publicUrl.js';
 import {
   newSaltHex, deriveVerifier, verifierMatches,
 } from '../lib/cryptoBackup.js';
@@ -56,6 +57,10 @@ export function isOwnHost(hostHeader) {
   if (/^[a-z0-9-]+\.local$/.test(name)) return true;
   const configured = String(process.env.CRM_OAUTH_REDIRECT_HOST || '').trim().toLowerCase();
   if (configured && (name === configured || host === configured)) return true;
+  // CRM_PUBLIC_URL (container / reverse-proxy deployments): its host, with or
+  // without the port, is the address the operator opens the CRM at.
+  const pub = parsePublicUrl();
+  if (pub.origin && (name === pub.hostname || host === pub.host)) return true;
   return lanIps().includes(name);
 }
 function redirectUri(req) {

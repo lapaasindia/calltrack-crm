@@ -56,12 +56,15 @@ try {
 }
 
 const { urls } = instance;
+const { parsePublicUrl } = await import('./lib/publicUrl.js');
+const publicUrl = parsePublicUrl().origin;
 console.log('\n  CallTrack CRM is running!\n');
+if (publicUrl) console.log(`  Public address:    ${publicUrl}`);
 console.log(`  On this computer:  ${urls.local}`);
 for (const u of urls.lan) console.log(`  On office WiFi:    ${u}`);
 console.log(`  Easy to remember:  ${urls.mdns}  (works on iPhones/most Androids)\n`);
 console.log('  Scan to open on a phone:\n');
-qrcode.generate(urls.lan[0] || urls.local, { small: true });
+qrcode.generate(publicUrl || urls.lan[0] || urls.local, { small: true });
 console.log('');
 
 // Graceful shutdown (SCALE-8): launchctl unload / reboot / Ctrl-C send a

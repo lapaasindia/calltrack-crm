@@ -1,0 +1,27 @@
+# CallTrack CRM — single-container deployment.
+#
+#   CRM_ADMIN_PASSWORD=<strong password> docker compose up -d --build
+#   open http://localhost:3000, log in as admin
+#
+# Behind an HTTPS reverse proxy (Coolify/Traefik, Caddy, nginx) also set
+# CRM_PUBLIC_URL=https://crm.example.com and CRM_SECURE_COOKIES=true.
+# CRM_TRUST_PROXY defaults to 1 (the image default); set it to 0 only if
+# clients reach port 3000 directly with no proxy in front. Data (database,
+# backups, recordings, logs, secret.key) persists in the calltrack-data volume.
+services:
+  calltrack:
+    build: .
+    image: calltrack-crm:local
+    ports:
+      - "3000:3000"
+    volumes:
+      - calltrack-data:/data
+    environment:
+      CRM_ADMIN_PASSWORD: ${CRM_ADMIN_PASSWORD:?set CRM_ADMIN_PASSWORD to a strong admin password}
+      CRM_PUBLIC_URL: ${CRM_PUBLIC_URL:-}
+      CRM_SECURE_COOKIES: ${CRM_SECURE_COOKIES:-false}
+      CRM_TRUST_PROXY: ${CRM_TRUST_PROXY:-1}
+    restart: unless-stopped
+
+volumes:
+  calltrack-data:

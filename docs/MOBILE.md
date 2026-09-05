@@ -45,8 +45,10 @@ logging** (every call attaches to leads) — just no audio/transcript.
 5. On the office computer, open CallTrack → **Settings → Paired phones → Pair
    phone** → pick the caller's name → a QR appears. Scan it.
 6. **Confirm the server** — the app shows "Pair this phone with 192.168.x.x:3000?"
-   Only tap OK if that is your office computer (it refuses anything that is not
-   a LAN address).
+   (or "…with crm.yourcompany.com?" for a cloud/Coolify instance). Only tap OK
+   if that is your CRM. Over plain `http://` the app refuses anything that is
+   not an office-network address; an internet server is accepted only over
+   `https://`.
 7. **Grant the permissions** the app's setup screen asks for:
    - **Call log** — tap Allow
    - **Audio access** — tap Allow (lets the app find the dialer's recordings)

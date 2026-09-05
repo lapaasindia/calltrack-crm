@@ -246,9 +246,12 @@ function validatePairingUrl(raw) {
   if (u.username || u.password) throw new Error('The server address must not contain a username or password');
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   const privateV4 = PRIVATE_V4.test(host) && host.split('.').every((o) => Number(o) <= 255);
-  const ok = privateV4 || host === 'localhost' || host.endsWith('.local');
+  // Plain http is only ever safe on the office network (the bearer token would
+  // travel in clear); an https server (a cloud/Coolify deployment behind TLS)
+  // may live on any hostname — TLS protects the token and the pairing code.
+  const ok = u.protocol === 'https:' || privateV4 || host === 'localhost' || host.endsWith('.local');
   if (!ok) {
-    throw new Error(`"${host}" is not an office-network address. CallTrack only pairs with a server on your own WiFi (192.168.x.x, 10.x.x.x, 172.16–31.x.x or name.local).`);
+    throw new Error(`"${host}" is not an office-network address. Over plain http CallTrack only pairs with a server on your own WiFi (192.168.x.x, 10.x.x.x, 172.16–31.x.x or name.local); an internet server must use https://.`);
   }
   return `${u.protocol}//${u.host}`;
 }
@@ -263,7 +266,7 @@ function renderPairing(error) {
       <button class="btn" id="scan">📷 Scan pairing QR</button>
       <div class="muted" style="text-align:center;margin:16px 0 8px">— or enter manually —</div>
       <label>Office server address</label>
-      <input id="url" inputmode="url" placeholder="192.168.1.50:3000" />
+      <input id="url" inputmode="url" placeholder="192.168.1.50:3000 or https://crm.yourcompany.com" />
       <label>Pairing code (from admin → Settings → Pair phone)</label>
       <input id="code" autocapitalize="characters" placeholder="ABC123" />
       <button class="btn ghost" id="manual" style="margin-top:18px">Connect</button>
