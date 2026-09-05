@@ -60,10 +60,26 @@ fs.mkdirSync(markerDir, { recursive: true });
 try { execFileSync('launchctl', lc.bootout, { stdio: 'ignore' }); } catch { /* not loaded */ }
 fs.writeFileSync(plistPath, plist);
 fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2));
-try {
-  execFileSync('launchctl', lc.bootstrap, { stdio: 'inherit' });
-} catch (err) {
-  console.error(`launchctl bootstrap failed (${err.message}). The plist is at ${plistPath};`);
+// launchd sometimes answers "Bootstrap failed: 5: Input/output error" when a
+// label is re-bootstrapped within a second of its bootout (seen live on
+// 2026-09-05 — the service stayed down until a second attempt). Retry with a
+// short backoff before giving up, so a reinstall never leaves the office
+// server stopped.
+let bootstrapped = false;
+let lastErr = null;
+for (let attempt = 1; attempt <= 6 && !bootstrapped; attempt += 1) {
+  try {
+    execFileSync('launchctl', lc.bootstrap, { stdio: attempt === 6 ? 'inherit' : 'pipe' });
+    bootstrapped = true;
+  } catch (err) {
+    lastErr = err;
+    const waitMs = 500 * attempt;
+    console.warn(`launchctl bootstrap attempt ${attempt} failed (${(err.stderr || err.message || '').toString().trim().split('\n')[0]}); retrying in ${waitMs} ms…`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+  }
+}
+if (!bootstrapped) {
+  console.error(`launchctl bootstrap failed (${lastErr && lastErr.message}). The plist is at ${plistPath};`);
   console.error(`try: launchctl ${lc.bootstrap.join(' ')}`);
   process.exit(1);
 }
