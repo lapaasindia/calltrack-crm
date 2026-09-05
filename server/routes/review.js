@@ -12,6 +12,8 @@ import { recalcLeadScore } from '../lib/scoring.js';
 import { isAdmin, canSeeAllLeads } from '../lib/permissions.js';
 import { CALL_TYPES, OUTCOMES } from './calls.js';
 import { RECORDINGS_BASE } from './sync.js';
+import { playableInfo, contentTypeFor } from '../lib/transcode.js';
+import { bump as bumpCache } from '../lib/cache.js';
 
 const router = Router();
 router.use(requireWriter);
@@ -116,6 +118,7 @@ router.post('/captured/:id/create-lead', (req, res) => {
     recalcLeadScore(db, lead.id);
     return lead.id;
   })();
+  bumpCache();
 
   res.json({ ok: true, lead_id: leadId });
 });
@@ -151,6 +154,7 @@ router.post('/captured/:id/attach-existing', (req, res) => {
       ).run(lead.id, lead.assigned_to || req.user.id, dueAt, 'Repeat call — from synced number', nowUtc());
     }
   })();
+  bumpCache();
 
   res.json({ ok: true, lead_id: lead.id });
 });
@@ -186,11 +190,18 @@ router.get('/recordings', (req, res) => {
   const s = scope(req, 'r.user_id');
   const rows = db.prepare(
     `SELECT r.id, r.original_filename, r.duration_seconds, r.rec_start_ts, r.match_status,
-            r.created_at, u.full_name AS user_name
+            r.created_at, r.file_path, r.playable_path, u.full_name AS user_name
      FROM recordings r JOIN users u ON u.id = r.user_id
      WHERE r.match_status IN ('ambiguous','unmatched') ${s.clause}
      ORDER BY r.created_at DESC LIMIT 100`
   ).all(...s.params);
+  // MOB-22: can the browser play what /audio/:id will serve? (paths stay
+  // server-side)
+  for (const r of rows) {
+    Object.assign(r, playableInfo(r.file_path, r.playable_path));
+    delete r.file_path;
+    delete r.playable_path;
+  }
 
   // Nearby activity (±10 min) as attach candidates for each recording.
   const candidates = db.prepare(
@@ -243,11 +254,25 @@ router.get('/untagged', (req, res) => {
   const rows = db.prepare(
     `SELECT c.id, c.called_at, c.direction, c.duration_seconds, c.call_type,
             l.id AS lead_id, l.name, l.phone, l.stage,
-            (SELECT r.id FROM recordings r WHERE r.call_id = c.id LIMIT 1) AS recording_id
+            r.id AS recording_id, r.file_path AS rec_file_path, r.playable_path AS rec_playable_path
      FROM calls c JOIN leads l ON l.id = c.lead_id AND l.deleted_at IS NULL
+     LEFT JOIN recordings r ON r.id = (SELECT r2.id FROM recordings r2 WHERE r2.call_id = c.id ORDER BY r2.id LIMIT 1)
      WHERE c.auto_logged = 1 AND c.disposition = 'connected' AND c.outcome IS NULL ${s.clause}
      ORDER BY c.called_at DESC LIMIT 100`
   ).all(...s.params);
+  // MOB-22: recording_playable / recording_playable_ext next to recording_id.
+  for (const r of rows) {
+    if (r.recording_id) {
+      const p = playableInfo(r.rec_file_path, r.rec_playable_path);
+      r.recording_playable = p.playable;
+      r.recording_playable_ext = p.playable_ext;
+    } else {
+      r.recording_playable = null;
+      r.recording_playable_ext = null;
+    }
+    delete r.rec_file_path;
+    delete r.rec_playable_path;
+  }
   res.json(rows);
 });
 
@@ -304,7 +329,20 @@ router.get('/audio/:id', (req, res) => {
   } else if (!canAccessRecording(req.user, rec)) {
     return res.status(403).json({ error: 'No access' });
   }
-  res.sendFile(path.join(RECORDINGS_BASE, rec.file_path));
+  // MOB-22: prefer the transcoded .m4a sibling (browser-playable) when the
+  // worker has produced one; otherwise the original. Explicit Content-Type
+  // per extension (audio/mp4, audio/amr, …) — express's guess for .m4a is
+  // audio/x-m4a and for .3gp video/3gpp. Range requests are handled by
+  // sendFile as before (Safari needs them). A purged file (retention) is a
+  // clean 404 instead of a path.join(null) 500.
+  const rel = rec.playable_path || rec.file_path;
+  if (!rel) return res.status(404).json({ error: 'Recording audio is no longer stored (retention)' });
+  const abs = path.join(RECORDINGS_BASE, rel);
+  res.sendFile(abs, { headers: { 'Content-Type': contentTypeFor(rel) } }, (err) => {
+    if (!err || res.headersSent) return;
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'Recording file missing on server' });
+    res.status(500).json({ error: 'Could not read recording' });
+  });
 });
 
 export default router;

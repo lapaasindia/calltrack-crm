@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import db, { DATA_DIR, DB_PATH, dbHealth, getSetting } from '../db.js';
 import { activeJobs } from './jobs.js';
+import { transcodeStatus } from './transcode.js';
+import { cacheStats } from './cache.js';
 import { log } from './logger.js';
 
 const loopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -63,6 +65,8 @@ export function opsHealth({ version } = {}) {
     last_cloud_backup: getSetting('last_cloud_backup', null),
     last_maintenance: getSetting('last_maintenance', null),
     ai_queue: ai,
+    transcode: transcodeStatus(),
+    cache: cacheStats(),
     event_loop_lag_ms: lag.p99,
     event_loop_lag: lag,
     free_disk_gb: freeDiskGb(),

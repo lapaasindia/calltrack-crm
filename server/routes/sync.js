@@ -12,6 +12,8 @@ import { matchRecording } from '../lib/recordingMatch.js';
 import { changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
 import { canSeeAllLeads } from '../lib/permissions.js';
+import { enqueueTranscode, needsTranscode } from '../lib/transcode.js';
+import { bump as bumpCache } from '../lib/cache.js';
 
 const router = Router();
 router.use(requireDevice);
@@ -80,18 +82,33 @@ router.post('/calls', (req, res) => {
   if (!items.length) return res.status(400).json({ error: 'No calls in batch' });
   if (items.length > 500) return res.status(400).json({ error: 'Batch too large (max 500)' });
 
-  const findLead = db.prepare(
+  const findLeadByCurrentPhone = db.prepare(
     'SELECT id, assigned_to, stage FROM leads WHERE phone = ? AND deleted_at IS NULL'
   );
+  // SCALE-18(b): a number the lead USED to have (lead_phones kind='previous',
+  // written by the migration-018 trigger when leads.phone is edited) still
+  // attaches its calls to that lead — a customer calling back from the old
+  // SIM no longer lands in "unknown numbers". A live lead whose CURRENT phone
+  // is the number always wins; among previous holders the most recent one.
+  const findLeadByPreviousPhone = db.prepare(
+    `SELECT l.id, l.assigned_to, l.stage
+       FROM lead_phones lp JOIN leads l ON l.id = lp.lead_id
+      WHERE lp.phone = ? AND lp.kind = 'previous' AND l.deleted_at IS NULL
+      ORDER BY lp.valid_to DESC, lp.id DESC LIMIT 1`
+  );
+  const findLead = { get: (phone) => findLeadByCurrentPhone.get(phone) || findLeadByPreviousPhone.get(phone) };
   const isIgnored = db.prepare('SELECT 1 FROM ignored_numbers WHERE phone = ?');
   // SCALE-18(a): the call-log entry (device, ts) for THIS phone number may
   // already be recorded on an earlier lead that carried the same number (a
-  // soft-deleted lead re-created under a new id). Keyed on phone, not lead_id,
-  // so a re-sync never backdates the new lead with the old lead's history.
+  // soft-deleted lead re-created under a new id, or a lead whose number was
+  // edited since). Keyed on phone — current or historical (lead_phones) —
+  // not lead_id, so a re-sync never backdates the new lead with the old
+  // lead's history.
   const priorByPhone = db.prepare(
     `SELECT c.id FROM calls c JOIN leads l ON l.id = c.lead_id
       WHERE c.device_id = ? AND c.user_id = ? AND c.call_log_ts = ? AND c.source = 'mobile'
-        AND l.phone = ?`
+        AND (l.phone = ? OR EXISTS (
+          SELECT 1 FROM lead_phones lp WHERE lp.lead_id = c.lead_id AND lp.phone = ?))`
   );
   const insertCall = db.prepare(
     `INSERT INTO calls (lead_id, user_id, call_type, disposition, called_at,
@@ -119,7 +136,7 @@ router.post('/calls', (req, res) => {
 
     const lead = findLead.get(norm.phone);
     if (lead) {
-      if (priorByPhone.get(req.device.id, req.user.id, ts, norm.phone)) {
+      if (priorByPhone.get(req.device.id, req.user.id, ts, norm.phone, norm.phone)) {
         return { status: 'duplicate', lead_id: lead.id };
       }
       const disposition = duration > 0 ? 'connected' : 'not_picked';
@@ -153,6 +170,8 @@ router.post('/calls', (req, res) => {
     return info.changes ? { status: 'captured' } : { status: 'duplicate' };
   }))();
 
+  // Calls changed → dashboards/leaderboards recompute (SCALE-12 cache).
+  if (results.some((r) => r.status === 'attached')) bumpCache();
   res.json({ results });
 });
 
@@ -255,11 +274,19 @@ router.post('/recordings', uploadGuards, receiveFile, (req, res) => {
       req.file.size, durationSeconds, lastModifiedMs, match.status, nowUtc()
     );
 
+    // MOB-22: .amr/.3gp/.ogg/.opus cannot play in the WebView or Safari —
+    // queue a background ffmpeg → .m4a sibling (lib/transcode.js). The
+    // original stays for the AI pipeline; the response says whether the
+    // file is playable as-is so the app can show the right hint.
+    const transcodeQueued = enqueueTranscode(info.lastInsertRowid, ext);
+
     res.json({
       status: 'stored',
       recording_id: info.lastInsertRowid,
       match_status: match.status,
       call_id: match.callId,
+      playable: !needsTranscode(ext),
+      transcode_queued: transcodeQueued,
     });
   } finally {
     fs.rmSync(tmpPath, { force: true });

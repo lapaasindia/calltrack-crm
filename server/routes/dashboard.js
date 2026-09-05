@@ -16,6 +16,7 @@ import {
   todayIst, addDays, istRangeBounds, istDayBounds,
 } from '../lib/istTime.js';
 import { isAdmin } from '../lib/permissions.js';
+import { cached } from '../lib/cache.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -91,16 +92,16 @@ function buildKpis(scope, range) {
     admin ? [] : [uid, uid]
   ).n;
 
-  // Calls + connects in the range (skip auto-logged noise the way reports do,
-  // and WhatsApp mirror rows which are messaging activity, not phone dials).
+  // Calls + connects in the range from the calls_daily rollup (migration
+  // 018, SCALE-12): one row per (user, IST day) maintained by triggers with
+  // exactly the reporting rule the old scan applied (manual calls + connected
+  // auto-logged ones, never WhatsApp mirror rows). [from, to] inclusive IST
+  // days == [startUtc, endUtc) — dashboard.test.js proves the equality.
   const calls = scalar(
-    `SELECT COUNT(*) AS dials, COALESCE(SUM(c.disposition = 'connected'), 0) AS connects
-       FROM calls c
-      WHERE c.called_at >= ? AND c.called_at < ?
-        AND (c.auto_logged = 0 OR c.disposition = 'connected')
-        AND c.source != 'whatsapp'
-        AND (${scope.callsClause})`,
-    admin ? [startUtc, endUtc] : [startUtc, endUtc, uid]
+    `SELECT COALESCE(SUM(dials), 0) AS dials, COALESCE(SUM(connects), 0) AS connects
+       FROM calls_daily
+      WHERE day >= ? AND day <= ? ${admin ? '' : 'AND user_id = ?'}`,
+    admin ? [from, to] : [from, to, uid]
   );
 
   return {
@@ -178,15 +179,13 @@ function buildTopPerformers(range) {
           GROUP BY assigned_to
        ) l ON l.assigned_to = u.id
        LEFT JOIN (
-         SELECT user_id, COUNT(*) AS calls, SUM(disposition = 'connected') AS connects
-           FROM calls WHERE called_at >= ? AND called_at < ?
-             AND (auto_logged = 0 OR disposition = 'connected')
-             AND source != 'whatsapp'
+         SELECT user_id, SUM(dials) AS calls, SUM(connects) AS connects
+           FROM calls_daily WHERE day >= ? AND day <= ?
           GROUP BY user_id
        ) c ON c.user_id = u.id
       WHERE u.is_active = 1
       ORDER BY revenuePaise DESC, deals DESC, calls DESC`
-  ).all(from, to, from, to, startUtc, endUtc, startUtc, endUtc);
+  ).all(from, to, from, to, startUtc, endUtc, from, to);
   // Only surface people who actually did something in the range.
   return rows.filter((r) => r.revenuePaise || r.deals || r.leads || r.calls);
 }
@@ -269,7 +268,10 @@ function buildIntelligence(scope, range) {
 }
 
 // GET /api/dashboard?from=&to= → role-aware metrics for req.user.
-router.get('/', (req, res) => {
+// Cached 30 s per (scope, query) — X-Cache: HIT|MISS (SCALE-12); every write
+// to calls/deals/payments/leads (and any mutating /api request) drops it.
+const dashboardScope = (req) => (isAdmin(req.user.role) ? `team:${req.user.role}` : `u:${req.user.id}`);
+router.get('/', cached('dashboard', dashboardScope), (req, res) => {
   const range = dateRange(req);
   const scope = scopeFor(req.user);
 

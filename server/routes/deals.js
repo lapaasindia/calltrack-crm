@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { invalidateOnWrite } from '../lib/cache.js';
 import db from '../db.js';
 import { requireAdmin, loadLead, canAccessLead } from '../middleware/auth.js';
 import { isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
@@ -12,6 +13,10 @@ import { recalcLeadScore } from '../lib/scoring.js';
 import { MAX_PAISE } from './catalog.js';
 
 const router = Router();
+// Every deal / payment / installment write drops the dashboard cache
+// (SCALE-12) — pipeline, revenue, leaderboard and top performers all read
+// these tables.
+router.use(invalidateOnWrite);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const METHODS = ['upi', 'cash', 'bank_transfer', 'card', 'cheque', 'other'];
 // Convert rupees → integer paise. Returns NaN for non-finite/out-of-range

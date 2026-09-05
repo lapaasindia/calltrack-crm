@@ -61,6 +61,8 @@ import backupRoutes from './routes/backup.js';
 import dashboardRoutes from './routes/dashboard.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import { startAiWorker } from './lib/ai.js';
+import { startTranscodeWorker } from './lib/transcode.js';
+import { invalidateOnWrite } from './lib/cache.js';
 import { startRetentionJob } from './lib/recordingsRetention.js';
 import { startWhatsApp, stopWhatsApp } from './lib/whatsapp.js';
 
@@ -199,6 +201,11 @@ export function createApp() {
   // /api (change-password/logout live under /api/auth, mounted above, so a
   // read_only user can still rotate their own password).
   app.use('/api', requireWriter);
+  // Catch-all cache invalidation (SCALE-12): any successful mutating request
+  // — sync, review, imports, WhatsApp, tasks… — drops the 30 s dashboard /
+  // leaderboard cache, on top of the explicit bump() in the calls / deals /
+  // payments / leads routes.
+  app.use('/api', invalidateOnWrite);
 
   // Owner-only operability snapshot (audit SCALE-17): DB integrity + WAL size,
   // backup ages, AI queue, event-loop lag, free disk. Authenticated, unlike
@@ -353,6 +360,7 @@ export function startServer({ port = 3000, processGuards = !process.env.NODE_TES
       startBackupScheduler();
       startCloudBackupScheduler();
       startAiWorker();
+      startTranscodeWorker(); // MOB-22: .amr/.3gp → .m4a siblings (no-op without ffmpeg)
       startRetentionJob();
       startMaintenanceJob();
       // WhatsApp: default-OFF and lazy. startWhatsApp() returns immediately when

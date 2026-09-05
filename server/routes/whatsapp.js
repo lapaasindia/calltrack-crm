@@ -18,6 +18,7 @@ import { nowUtc } from '../lib/istTime.js';
 import { recalcLeadScore } from '../lib/scoring.js';
 import { logAudit } from '../lib/audit.js';
 import { isAdmin } from '../lib/permissions.js';
+import { bump as bumpCache } from '../lib/cache.js';
 import {
   getSession, setSessionState, resetWhatsApp, startWhatsApp,
   logoutWhatsApp, sendText, jidToPhone, engineInstalled,
@@ -134,6 +135,18 @@ router.get('/contacts', requireAdmin, (req, res) => {
 });
 
 // ---------- THREAD (admin tier) ----------
+// Paged newest-first (SCALE-5):
+//   GET /contacts/:id/messages?before=<message id>&limit=<1..200, default 50>
+// returns the `limit` newest messages older than `before` (or the newest page
+// when `before` is absent), in chronological order, plus
+// { has_more, next_before } — pass next_before as the next `before`.
+// Without EITHER param the legacy shape is kept: the whole thread when it has
+// ≤ LEGACY_FULL_MAX messages, else the newest LEGACY_FULL_MAX + has_more, so
+// the existing client (which windows client-side) keeps working.
+const THREAD_DEFAULT_LIMIT = 50;
+const THREAD_MAX_LIMIT = 200;
+const LEGACY_FULL_MAX = 500;
+const THREAD_COLS = 'id, direction, message_type, body, sent_at, created_at';
 router.get('/contacts/:id/messages', requireAdmin, (req, res) => {
   const contact = db.prepare(
     `SELECT c.*, l.name AS lead_name, l.stage AS lead_stage, l.phone AS lead_phone,
@@ -141,10 +154,56 @@ router.get('/contacts/:id/messages', requireAdmin, (req, res) => {
      FROM wa_contacts c LEFT JOIN leads l ON l.id = c.lead_id WHERE c.id = ?`
   ).get(req.params.id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
-  const messages = db.prepare(
-    'SELECT id, direction, message_type, body, sent_at, created_at FROM wa_messages WHERE contact_id = ? ORDER BY sent_at, id'
-  ).all(contact.id);
-  res.json({ contact, messages });
+
+  const paged = req.query.before !== undefined || req.query.limit !== undefined;
+  let limit = parseInt(req.query.limit, 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = THREAD_DEFAULT_LIMIT;
+  limit = Math.min(THREAD_MAX_LIMIT, limit);
+
+  let anchor = null;
+  if (req.query.before !== undefined && req.query.before !== '') {
+    const beforeId = Number(req.query.before);
+    if (!Number.isInteger(beforeId) || beforeId <= 0) {
+      return res.status(400).json({ error: 'before must be a message id' });
+    }
+    anchor = db.prepare('SELECT id, sent_at FROM wa_messages WHERE id = ? AND contact_id = ?')
+      .get(beforeId, contact.id);
+    if (!anchor) return res.status(404).json({ error: 'Message not found in this thread' });
+  }
+
+  if (!paged) {
+    const total = db.prepare('SELECT COUNT(*) AS n FROM wa_messages WHERE contact_id = ?').get(contact.id).n;
+    if (total <= LEGACY_FULL_MAX) {
+      const messages = db.prepare(
+        `SELECT ${THREAD_COLS} FROM wa_messages WHERE contact_id = ? ORDER BY sent_at, id`
+      ).all(contact.id);
+      return res.json({ contact, messages, has_more: false, next_before: null, total });
+    }
+    limit = LEGACY_FULL_MAX;
+  }
+
+  // Newest `limit` older than the anchor (by (sent_at, id) — ids are not
+  // chronological after a history sync), one extra row to learn has_more.
+  const rows = anchor
+    ? db.prepare(
+      `SELECT ${THREAD_COLS} FROM wa_messages
+        WHERE contact_id = ? AND (sent_at < ? OR (sent_at = ? AND id < ?))
+        ORDER BY sent_at DESC, id DESC LIMIT ?`
+    ).all(contact.id, anchor.sent_at, anchor.sent_at, anchor.id, limit + 1)
+    : db.prepare(
+      `SELECT ${THREAD_COLS} FROM wa_messages
+        WHERE contact_id = ? ORDER BY sent_at DESC, id DESC LIMIT ?`
+    ).all(contact.id, limit + 1);
+  const hasMore = rows.length > limit;
+  if (hasMore) rows.length = limit;
+  rows.reverse();
+  res.json({
+    contact,
+    messages: rows,
+    has_more: hasMore,
+    next_before: hasMore && rows.length ? rows[0].id : null,
+    limit,
+  });
 });
 
 // ---------- PROMOTE CHAT → LEAD (admin tier) ----------
@@ -196,6 +255,7 @@ router.post('/contacts/:id/create-lead', requireAdmin, (req, res) => {
     recalcLeadScore(db, leadId);
     return { leadId, created };
   })();
+  bumpCache();
 
   logAudit({
     action: result.created ? 'WHATSAPP_LEAD_CREATED' : 'WHATSAPP_LEAD_LINKED',

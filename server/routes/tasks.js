@@ -15,6 +15,7 @@ import db from '../db.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { isAdmin } from '../lib/permissions.js';
 import { detectConflicts, conflictMessage } from '../lib/schedule.js';
+import { pagingOf } from '../lib/paging.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const BOARD_STATUSES = ['To Do', 'Doing', 'Review', 'Done', 'Drop'];
@@ -80,6 +81,13 @@ router.get('/', (req, res) => {
     where.push('t.board_status = ?');
     params.push(req.query.board_status);
   }
+  // Optional paging (SCALE-5): `?limit=<1..500>&offset=<n>` → { rows, total,
+  // limit, offset }; without either param the legacy bare array (first 500)
+  // is returned. X-Total-Count carries the count either way.
+  const paging = pagingOf(req.query, { defaultLimit: 500, maxLimit: 500 });
+  const total = db.prepare(
+    `SELECT COUNT(*) AS n FROM tasks t WHERE ${where.join(' AND ')}`
+  ).get(...params).n;
   const rows = db.prepare(
     `SELECT t.*, u.full_name AS assigned_to_name, l.name AS lead_name, l.phone AS lead_phone,
             p.name AS project_name
@@ -88,9 +96,11 @@ router.get('/', (req, res) => {
      LEFT JOIN leads l ON l.id = t.lead_id
      LEFT JOIN projects p ON p.id = t.project_id
      WHERE ${where.join(' AND ')}
-     ORDER BY t.due_date, t.id LIMIT 500`
-  ).all(...params);
-  res.json(rows);
+     ORDER BY t.due_date, t.id LIMIT ? OFFSET ?`
+  ).all(...params, paging.limit, paging.offset);
+  res.set('X-Total-Count', String(total));
+  if (!paging.explicit) return res.json(rows);
+  res.json({ rows, total, limit: paging.limit, offset: paging.offset });
 });
 
 // ---------- GET one ----------

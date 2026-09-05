@@ -4,6 +4,7 @@ import { loadLead, requireWriter } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
+import { bump as bumpCache } from '../lib/cache.js';
 
 const DISPOSITIONS = ['connected', 'not_picked', 'busy', 'switched_off', 'wrong_number'];
 export const CALL_TYPES = ['sales', 'follow_up', 'collection', 'support'];
@@ -105,6 +106,7 @@ router.post('/', loadLead, (req, res) => {
     return { callId, stage, followUpKept };
   })();
 
+  bumpCache(); // calls changed → dashboards / leaderboards recompute (SCALE-12)
   // follow_up_kept: true when a pending follow-up survived this (unreached)
   // call, so the client can hint "follow-up still due".
   res.json({ ok: true, call_id: result.callId, stage: result.stage, follow_up_kept: result.followUpKept });

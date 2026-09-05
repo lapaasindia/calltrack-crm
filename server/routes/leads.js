@@ -7,6 +7,8 @@ import { STAGES, changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
 import { isAdmin, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { getAutoAssignedOwner, assignRoundRobin } from '../lib/assignment.js';
+import { bump as bumpCache } from '../lib/cache.js';
+import { playableInfo } from '../lib/transcode.js';
 
 const router = Router();
 // read_only can browse; every write below is refused up front.
@@ -31,6 +33,45 @@ const moveOpenWork = (newAssignee, leadId) => {
   db.prepare("UPDATE tasks SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
     .run(newAssignee, leadId);
 };
+
+// ── Search (FTS5, migration 018) ────────────────────────────────────────────
+// Text queries go through leads_fts (name/city/email/notes/phone) as a
+// sanitised prefix query: the text is split on anything that is not a
+// letter/digit/mark — the same boundaries the unicode61 tokenizer uses, so
+// "rahul@example.com" and "col:on" break into the tokens the index holds and
+// no FTS operator (AND/OR/NOT/NEAR, quotes, parentheses, colons) can leak in.
+// Each token is double-quoted and suffixed with `*`; tokens are implicitly
+// ANDed. "rahul sha" → "rahul"* "sha"* — which also finds "Sharma Rahul",
+// unlike LIKE '%rahul sha%'. Returns null when there is nothing to search
+// with, or when the query is digits only (a partial phone: users type the
+// last 4-5 digits, which needs the substring LIKE path, not a prefix).
+export function buildFtsQuery(q) {
+  const tokens = String(q || '').split(/[^\p{L}\p{N}\p{M}]+/u)
+    .filter(Boolean)
+    .slice(0, 8);
+  if (!tokens.length) return null;
+  if (tokens.every((t) => /^\p{N}+$/u.test(t))) return null;
+  return tokens.map((t) => `"${t}"*`).join(' ');
+}
+function ftsAvailable() {
+  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'leads_fts'").get();
+}
+
+// Keyset cursor for the list (SCALE-5): opaque base64url of [updated_at, id]
+// of the last row returned. Stable under concurrent inserts/updates where
+// OFFSET paging skips or repeats rows.
+function encodeCursor(row) {
+  return Buffer.from(JSON.stringify([row.updated_at, row.id])).toString('base64url');
+}
+function decodeCursor(s) {
+  try {
+    const v = JSON.parse(Buffer.from(String(s), 'base64url').toString('utf8'));
+    if (Array.isArray(v) && typeof v[0] === 'string' && Number.isInteger(v[1])) {
+      return { updated_at: v[0], id: v[1] };
+    }
+  } catch { /* fall through */ }
+  return null;
+}
 
 // Tolerant JSON parse for stored TEXT(json) columns — a malformed blob must
 // never 500 the lead page.
@@ -75,35 +116,106 @@ router.get('/', (req, res) => {
     where.push('l.source = ?');
     params.push(req.query.source);
   }
+
+  // Search. Three paths, in order:
+  //   * a full phone number → exact match on the current phone OR any number
+  //     the lead has had (lead_phones: alt / previous), plus name LIKE — the
+  //     historical exact-phone semantics, widened to old numbers;
+  //   * text → FTS5 prefix query (search_mode 'fts'), falling back to LIKE if
+  //     the FTS table is missing or the query has no usable token;
+  //   * digits / anything else → the LIKE path (search_mode 'like').
+  let searchMode = null;
+  let ftsQuery = null;
+  let q = '';
   if (req.query.q) {
-    const q = String(req.query.q).trim();
+    q = String(req.query.q).trim();
     const asPhone = normalizePhone(q);
     if (asPhone.ok) {
-      where.push('(l.phone = ? OR l.name LIKE ?)');
-      params.push(asPhone.phone, `%${q}%`);
+      searchMode = 'phone';
+      where.push('(l.phone = ? OR l.name LIKE ? OR l.id IN (SELECT lead_id FROM lead_phones WHERE phone = ?))');
+      params.push(asPhone.phone, `%${q}%`, asPhone.phone);
     } else {
-      where.push('(l.name LIKE ? OR l.phone LIKE ? OR l.city LIKE ? OR l.email LIKE ?)');
-      const like = `%${q}%`;
-      params.push(like, q.replace(/\D/g, '') ? `%${q.replace(/\D/g, '')}%` : like, like, like);
+      ftsQuery = buildFtsQuery(q);
+      if (ftsQuery && ftsAvailable()) {
+        searchMode = 'fts';
+        where.push('l.id IN (SELECT rowid FROM leads_fts WHERE leads_fts MATCH ?)');
+        params.push(ftsQuery);
+      } else {
+        searchMode = 'like';
+        where.push(likeClause());
+        params.push(...likeParams(q));
+      }
     }
   }
 
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const pageSize = pageSizeOf(req.query);
-  const total = db.prepare(
-    `SELECT COUNT(*) AS n FROM leads l WHERE ${where.join(' AND ')}`
-  ).get(...params).n;
-  const rows = db.prepare(
-    `SELECT ${LEAD_COLS},
-       (SELECT due_at FROM follow_ups f WHERE f.lead_id = l.id AND f.status = 'pending') AS next_follow_up,
-       (SELECT MAX(called_at) FROM calls c WHERE c.lead_id = l.id) AS last_call_at
-     FROM leads l LEFT JOIN users u ON u.id = l.assigned_to
-     WHERE ${where.join(' AND ')}
-     ORDER BY l.updated_at DESC LIMIT ? OFFSET ?`
-  ).all(...params, pageSize, (page - 1) * pageSize);
+  let cursor = null;
+  if (req.query.cursor !== undefined && req.query.cursor !== '') {
+    cursor = decodeCursor(req.query.cursor);
+    if (!cursor) return res.status(400).json({ error: 'Invalid cursor' });
+  }
 
-  res.json({ leads: rows, total, page, page_size: pageSize });
+  const run = () => {
+    const total = db.prepare(
+      `SELECT COUNT(*) AS n FROM leads l WHERE ${where.join(' AND ')}`
+    ).get(...params).n;
+    // Keyset: rows strictly after the cursor in (updated_at DESC, id DESC)
+    // order; page/offset otherwise. One extra row tells us whether a next
+    // page exists without a second COUNT.
+    const pageWhere = cursor
+      ? [...where, '(l.updated_at < ? OR (l.updated_at = ? AND l.id < ?))']
+      : where;
+    const pageParams = cursor ? [...params, cursor.updated_at, cursor.updated_at, cursor.id] : params;
+    const offset = cursor ? 0 : (page - 1) * pageSize;
+    const rows = db.prepare(
+      `SELECT ${LEAD_COLS},
+         (SELECT due_at FROM follow_ups f WHERE f.lead_id = l.id AND f.status = 'pending') AS next_follow_up,
+         (SELECT MAX(called_at) FROM calls c WHERE c.lead_id = l.id) AS last_call_at
+       FROM leads l LEFT JOIN users u ON u.id = l.assigned_to
+       WHERE ${pageWhere.join(' AND ')}
+       ORDER BY l.updated_at DESC, l.id DESC LIMIT ? OFFSET ?`
+    ).all(...pageParams, pageSize + 1, offset);
+    const hasMore = rows.length > pageSize;
+    if (hasMore) rows.length = pageSize;
+    return { total, rows, hasMore };
+  };
+
+  let result;
+  try {
+    result = run();
+  } catch (err) {
+    // An FTS query the sanitiser somehow let through, or an FTS table that
+    // is missing/corrupt: degrade to the LIKE path rather than 500.
+    if (searchMode !== 'fts') throw err;
+    const i = where.findIndex((w) => w.includes('leads_fts'));
+    where.splice(i, 1, likeClause());
+    const pi = params.indexOf(ftsQuery);
+    params.splice(pi, 1, ...likeParams(q));
+    searchMode = 'like';
+    result = run();
+  }
+
+  const { total, rows, hasMore } = result;
+  res.json({
+    leads: rows,
+    total,
+    page: cursor ? null : page,
+    page_size: pageSize,
+    next_cursor: hasMore && rows.length ? encodeCursor(rows[rows.length - 1]) : null,
+    ...(searchMode ? { search_mode: searchMode } : {}),
+  });
 });
+
+// The pre-018 substring search, kept as the fallback path.
+function likeClause() {
+  return '(l.name LIKE ? OR l.phone LIKE ? OR l.city LIKE ? OR l.email LIKE ?)';
+}
+function likeParams(q) {
+  const like = `%${q}%`;
+  const digits = q.replace(/\D/g, '');
+  return [like, digits ? `%${digits}%` : like, like, like];
+}
 
 // Distinct sources for the filter dropdown.
 router.get('/sources', (req, res) => {
@@ -181,6 +293,7 @@ router.post('/', (req, res) => {
   // Initial score (source/stage factors) so a fresh lead is never NULL-scored
   // until its first event (SCALE-10).
   recalcLeadScore(db, info.lastInsertRowid);
+  bumpCache();
   res.json({
     id: info.lastInsertRowid,
     assigned_to: assignedTo,
@@ -198,7 +311,8 @@ router.get('/:id', loadLead, (req, res) => {
     `SELECT c.*, u.full_name AS user_name,
        r.id AS recording_id, r.summary AS recording_summary, r.transcript AS recording_transcript,
        r.translation AS recording_translation, r.ai_json AS recording_ai_json,
-       r.provider AS recording_provider, r.ai_status AS recording_ai_status
+       r.provider AS recording_provider, r.ai_status AS recording_ai_status,
+       r.file_path AS recording_file_path, r.playable_path AS recording_playable_path
      FROM calls c
      JOIN users u ON u.id = c.user_id
      LEFT JOIN recordings r ON r.id = (
@@ -209,6 +323,17 @@ router.get('/:id', loadLead, (req, res) => {
   for (const c of calls) {
     c.recording_ai = c.recording_ai_json ? safeJson(c.recording_ai_json) : null;
     delete c.recording_ai_json;
+    // MOB-22: can the browser play what /api/review/audio/:id will serve?
+    if (c.recording_id) {
+      const p = playableInfo(c.recording_file_path, c.recording_playable_path);
+      c.recording_playable = p.playable;
+      c.recording_playable_ext = p.playable_ext;
+    } else {
+      c.recording_playable = null;
+      c.recording_playable_ext = null;
+    }
+    delete c.recording_file_path;
+    delete c.recording_playable_path;
   }
   const events = db.prepare(
     `SELECT e.*, u.full_name AS user_name FROM lead_events e
@@ -309,6 +434,10 @@ router.patch('/:id', loadLead, (req, res) => {
           err.status = 409;
           throw err;
         }
+        // SCALE-18(b): the migration-018 trigger trg_lead_phones_au_phone
+        // records the old number in lead_phones as 'previous' (valid_to =
+        // now) and the new one as the open 'primary' — sync keeps attaching
+        // calls from the old number to this lead.
         db.prepare('UPDATE leads SET phone = ?, phone_raw = ?, updated_at = ? WHERE id = ?')
           .run(normPhone, String(req.body.phone), nowUtc(), lead.id);
       }
@@ -320,6 +449,7 @@ router.patch('/:id', loadLead, (req, res) => {
     }
     throw err;
   }
+  bumpCache();
   res.json({ ok: true });
 });
 
@@ -334,8 +464,10 @@ router.delete('/:id', requireAdmin, (req, res) => {
       .run(lead.id);
     // Unlink WhatsApp chats so the contact can be promoted to a fresh lead
     // later and inbound messages stop mirroring into a deleted lead (SCALE-19).
+    // (lead_phones rows are closed by trigger trg_lead_phones_au_deleted.)
     db.prepare('UPDATE wa_contacts SET lead_id = NULL WHERE lead_id = ?').run(lead.id);
   })();
+  bumpCache();
   res.json({ ok: true });
 });
 
@@ -364,6 +496,7 @@ router.post('/bulk-assign', requireAdmin, (req, res) => {
       moveOpenWork(to, id);
     });
   })();
+  bumpCache();
   res.json({ ok: true, assigned: ids.length });
 });
 

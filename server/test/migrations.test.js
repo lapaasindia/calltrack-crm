@@ -1,8 +1,11 @@
-// Migration runner + 017 (audit SCALE-1/2/3/14/22/23). Builds a v16 database
-// the way db.js does (001..016, honouring the no-transaction directive), fills
-// it with realistic rows, then imports db.js against it so 017 runs on REAL
-// data — asserting the indexes, planner statistics, schema_migrations
-// bookkeeping, the seeded invoice counter and the new columns. Finally the
+// Migration runner + 017 (audit SCALE-1/2/3/14/22/23) + 018 (wave 2: lead
+// phone history, FTS5 lead search, calls_daily rollup, playable recordings).
+// Builds a v16 database the way db.js does (001..016, honouring the
+// no-transaction directive), fills it with realistic rows, then imports db.js
+// against it so 017 and 018 run on REAL data — asserting the indexes, planner
+// statistics, schema_migrations bookkeeping, the seeded invoice counter, the
+// new columns, the 018 backfills (and their equality with the queries they
+// replace) and that every statement is re-runnable. Finally the
 // future-schema guard is exercised via a second module instance.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -62,14 +65,33 @@ const seeded = {};
     "INSERT INTO products (name, price_paise, created_at) VALUES ('Course', 5000000, ?)"
   ).run(now).lastInsertRowid;
   const insLead = db.prepare(
-    `INSERT INTO leads (name, phone, phone_raw, source, stage, assigned_to, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO leads (name, phone, phone_raw, alt_phone, city, notes, source, stage, assigned_to, created_at, updated_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const leadIds = [];
   for (let i = 0; i < 25; i += 1) {
     const phone = String(9000000000 + i);
-    leadIds.push(insLead.run(`Lead ${i}`, phone, phone, i % 2 ? 'referral' : 'import',
-      i % 5 === 0 ? 'won' : 'contacted', caller, now, now).lastInsertRowid);
+    // Two alt phones in the wild formats lib/leadMatch.js tolerated, one alt
+    // that is not a mobile number (must NOT be backfilled), one deleted lead,
+    // one Hindi name for the FTS tokenizer.
+    const alt = i === 2 ? '+91 97000-00002' : i === 3 ? '097000 00003' : i === 4 ? '011-23456' : null;
+    const name = i === 7 ? 'राहुल शर्मा' : `Lead ${i}`;
+    leadIds.push(insLead.run(name, phone, phone, alt, i % 3 ? 'Delhi' : 'Bengaluru',
+      i === 8 ? 'wants the advanced course' : null, i % 2 ? 'referral' : 'import',
+      i % 5 === 0 ? 'won' : 'contacted', caller, now, now, i === 9 ? now : null).lastInsertRowid);
+  }
+  // Calls across users / IST days / sources / auto_logged so the 018 rollup
+  // backfill has every branch of the reporting rule to get right.
+  const insCall = db.prepare(
+    `INSERT INTO calls (lead_id, user_id, call_type, disposition, called_at, source, auto_logged)
+     VALUES (?, ?, 'sales', ?, ?, ?, ?)`
+  );
+  const dispositions = ['connected', 'not_picked', 'busy', 'connected'];
+  for (let i = 0; i < 400; i += 1) {
+    const ms = Date.now() - (i * 3600 * 1000 * 5); // every 5 h back over ~83 days
+    insCall.run(leadIds[i % leadIds.length], userIds[i % 4 + 3], dispositions[i % 4],
+      new Date(ms).toISOString(), i % 7 === 0 ? 'whatsapp' : i % 3 === 0 ? 'mobile' : 'manual',
+      i % 3 === 0 ? 1 : 0);
   }
   const insDeal = db.prepare(
     `INSERT INTO deals (lead_id, product_id, created_by, deal_value_paise, won_at, won_date, created_at)
@@ -103,7 +125,7 @@ const seeded = {};
   db.prepare(
     "INSERT INTO follow_ups (lead_id, assigned_to, due_at, status, created_at) VALUES (?, ?, ?, 'pending', ?)"
   ).run(leadIds[1], caller, now, now);
-  for (const t of ['users', 'leads', 'deals', 'installments', 'payments', 'invoices', 'tasks', 'follow_ups']) {
+  for (const t of ['users', 'leads', 'calls', 'deals', 'installments', 'payments', 'invoices', 'tasks', 'follow_ups']) {
     seeded[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
   }
   db.close();
@@ -132,10 +154,10 @@ const EXPECTED_INDEXES = [
   'idx_deals_status',
 ];
 
-test('017 applies on a populated v16 database and lands at the latest version', () => {
+test('017 + 018 apply on a populated v16 database and land at the latest version', () => {
   assert.equal(db.pragma('user_version', { simple: true }), dbMod.LATEST_MIGRATION);
-  assert.ok(dbMod.LATEST_MIGRATION >= 17);
-  assert.deepEqual(dbMod.dbHealth.migrations_applied, [17]);
+  assert.ok(dbMod.LATEST_MIGRATION >= 18);
+  assert.deepEqual(dbMod.dbHealth.migrations_applied, [17, 18]);
   assert.ok(migrateMs < 5000, `migration + boot checks took ${migrateMs} ms`);
   // Nothing lost.
   for (const [t, n] of Object.entries(seeded)) {
@@ -174,6 +196,7 @@ test('schema_migrations records every version with the app version for the new o
   assert.deepEqual(rows.map((r) => r.version), Array.from({ length: dbMod.LATEST_MIGRATION }, (_, i) => i + 1));
   const v17 = rows.find((r) => r.version === 17);
   assert.equal(v17.app_version, PKG_VERSION);
+  assert.equal(rows.find((r) => r.version === 18).app_version, PKG_VERSION);
   assert.equal(dbMod.APP_VERSION, PKG_VERSION);
   assert.ok(rows.filter((r) => r.version < 17).every((r) => r.app_version === 'unrecorded'));
   assert.ok(rows.every((r) => /^\d{4}-\d{2}-\d{2}T/.test(r.applied_at)));
@@ -186,6 +209,118 @@ test('counters seeded from the highest existing invoice number; new columns pres
   assert.ok(cols('tasks').has('cancel_reason'));
   assert.ok(cols('follow_ups').has('cancel_reason'));
   assert.ok(cols('invoices').has('deleted_at'));
+});
+
+// ── 018 ─────────────────────────────────────────────────────────────────────
+const OLD_ROLLUP_SQL = `SELECT user_id, date(called_at, '+330 minutes') AS day, COUNT(*) AS dials,
+    SUM(disposition = 'connected') AS connects, COUNT(DISTINCT lead_id) AS unique_leads
+  FROM calls WHERE (auto_logged = 0 OR disposition = 'connected') AND source != 'whatsapp'
+  GROUP BY user_id, day ORDER BY user_id, day`;
+const ROLLUP_SQL = 'SELECT user_id, day, dials, connects, unique_leads FROM calls_daily ORDER BY user_id, day';
+
+test('018: recordings.playable_path, lead_phones backfill (primary + normalised alt, deleted closed)', () => {
+  const cols = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));
+  assert.ok(cols.has('playable_path'));
+
+  const byKind = Object.fromEntries(
+    db.prepare('SELECT kind, COUNT(*) AS n FROM lead_phones GROUP BY kind').all().map((r) => [r.kind, r.n]),
+  );
+  assert.equal(byKind.primary, seeded.leads, 'one primary row per lead (deleted ones included)');
+  assert.equal(byKind.alt, 2, 'only the two alt phones that reduce to a mobile number');
+  assert.equal(byKind.previous ?? 0, 0);
+  const alts = db.prepare("SELECT phone FROM lead_phones WHERE kind = 'alt' ORDER BY phone").all().map((r) => r.phone);
+  assert.deepEqual(alts, ['9700000002', '9700000003']);
+  // The deleted lead's primary row is closed at deleted_at; live ones are open.
+  const deleted = db.prepare('SELECT id, deleted_at FROM leads WHERE deleted_at IS NOT NULL').get();
+  assert.equal(db.prepare("SELECT valid_to FROM lead_phones WHERE lead_id = ? AND kind = 'primary'").get(deleted.id).valid_to, deleted.deleted_at);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM lead_phones WHERE kind = 'primary' AND valid_to IS NULL").get().n, seeded.leads - 1);
+  for (const t of ['trg_lead_phones_ai', 'trg_lead_phones_au_phone', 'trg_lead_phones_au_alt', 'trg_lead_phones_au_deleted',
+    'trg_leads_fts_ai', 'trg_leads_fts_ad', 'trg_leads_fts_au', 'trg_calls_daily_ai', 'trg_calls_daily_au', 'trg_calls_daily_ad']) {
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(t), `trigger ${t}`);
+  }
+});
+
+test('018: lead_phones triggers — phone edit → previous, alt edit, soft delete closes rows', () => {
+  const lead = db.prepare("SELECT id, phone FROM leads WHERE deleted_at IS NULL AND alt_phone IS NULL LIMIT 1").get();
+  db.prepare("UPDATE leads SET phone = '9555500001', updated_at = ? WHERE id = ?").run(now, lead.id);
+  const rows = db.prepare('SELECT phone, kind, valid_to FROM lead_phones WHERE lead_id = ? ORDER BY id').all(lead.id);
+  assert.deepEqual(rows.map((r) => [r.phone, r.kind, r.valid_to === null]), [[lead.phone, 'previous', false], ['9555500001', 'primary', true]]);
+  assert.match(rows[0].valid_to, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, 'valid_to is a nowUtc()-shaped instant');
+  // Same-value update is a no-op.
+  db.prepare("UPDATE leads SET phone = '9555500001' WHERE id = ?").run(lead.id);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM lead_phones WHERE lead_id = ?').get(lead.id).n, 2);
+  // alt: set, then change (old alt closed, new alt open), then non-mobile (closed, none added).
+  db.prepare("UPDATE leads SET alt_phone = '+91 96666 00001' WHERE id = ?").run(lead.id);
+  db.prepare("UPDATE leads SET alt_phone = '9666600002' WHERE id = ?").run(lead.id);
+  db.prepare("UPDATE leads SET alt_phone = '011-2345' WHERE id = ?").run(lead.id);
+  const alts = db.prepare("SELECT phone, valid_to IS NULL AS open FROM lead_phones WHERE lead_id = ? AND kind = 'alt' ORDER BY id").all(lead.id);
+  assert.deepEqual(alts.map((a) => [a.phone, a.open]), [['9666600001', 0], ['9666600002', 0]]);
+  // Soft delete closes everything still open.
+  db.prepare("UPDATE leads SET deleted_at = ? WHERE id = ?").run('2026-09-05T00:00:00.000Z', lead.id);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM lead_phones WHERE lead_id = ? AND valid_to IS NULL').get(lead.id).n, 0);
+  assert.equal(db.prepare("SELECT valid_to FROM lead_phones WHERE lead_id = ? AND kind = 'primary'").get(lead.id).valid_to, '2026-09-05T00:00:00.000Z');
+});
+
+test('018: leads_fts indexes existing rows (Hindi tokens intact) and follows inserts/updates/deletes', () => {
+  const match = (q) => db.prepare('SELECT rowid FROM leads_fts WHERE leads_fts MATCH ? ORDER BY rowid').all(q).map((r) => r.rowid);
+  const hindi = db.prepare("SELECT id FROM leads WHERE name = 'राहुल शर्मा'").get().id;
+  assert.deepEqual(match('"राह"*'), [hindi], 'prefix of a Devanagari name with matras is one token');
+  assert.deepEqual(match('"शर्मा"'), [hindi]);
+  assert.deepEqual(match('"advanced"*'), [db.prepare("SELECT id FROM leads WHERE notes LIKE '%advanced%'").get().id], 'notes indexed');
+  assert.equal(match('"beng"*').length, db.prepare("SELECT COUNT(*) AS n FROM leads WHERE city = 'Bengaluru'").get().n, 'city indexed');
+  const id = db.prepare(
+    "INSERT INTO leads (name, phone, phone_raw, source, created_at, updated_at) VALUES ('Zubin Test', '9444400001', '9444400001', 'manual', ?, ?)"
+  ).run(now, now).lastInsertRowid;
+  assert.deepEqual(match('"zubin"*'), [id]);
+  db.prepare("UPDATE leads SET name = 'Zarina Test' WHERE id = ?").run(id);
+  assert.deepEqual(match('"zubin"*'), []);
+  assert.deepEqual(match('"zarina"*'), [id]);
+  db.prepare('DELETE FROM lead_phones WHERE lead_id = ?').run(id);
+  db.prepare('DELETE FROM leads WHERE id = ?').run(id);
+  assert.deepEqual(match('"zarina"*'), []);
+});
+
+test('018: calls_daily backfill equals the old GROUP BY over calls, and triggers keep it equal', () => {
+  const eq = (label) => assert.deepEqual(db.prepare(ROLLUP_SQL).all(), db.prepare(OLD_ROLLUP_SQL).all(), label);
+  eq('backfill');
+  assert.ok(db.prepare('SELECT COUNT(*) AS n FROM calls_daily').get().n > 20, 'several (user, day) buckets');
+  const anyLead = db.prepare('SELECT id FROM leads WHERE deleted_at IS NULL LIMIT 1').get().id;
+  const u = db.prepare("SELECT id FROM users WHERE role = 'caller'").get().id;
+  // Insert at the IST day boundary (18:30 UTC = 00:00 IST next day) in every branch of the rule.
+  const ins = db.prepare(
+    "INSERT INTO calls (lead_id, user_id, call_type, disposition, called_at, source, auto_logged) VALUES (?, ?, 'sales', ?, ?, ?, ?)"
+  );
+  const a = ins.run(anyLead, u, 'connected', '2026-08-31T18:30:00.000Z', 'manual', 0).lastInsertRowid;
+  const b = ins.run(anyLead, u, 'not_picked', '2026-08-31T18:29:59.999Z', 'mobile', 1).lastInsertRowid; // excluded (auto, not connected)
+  const c = ins.run(anyLead, u, 'connected', '2026-08-31T18:29:59.999Z', 'whatsapp', 0).lastInsertRowid; // excluded (whatsapp)
+  eq('after inserts');
+  assert.deepEqual(db.prepare("SELECT dials, connects FROM calls_daily WHERE user_id = ? AND day = '2026-09-01'").get(u), { dials: 1, connects: 1 });
+  // Updates that move a row across buckets / users / the rule.
+  db.prepare("UPDATE calls SET called_at = '2026-08-31T18:29:59.999Z' WHERE id = ?").run(a); // day → 2026-08-31
+  eq('after moving across the IST midnight');
+  db.prepare("UPDATE calls SET disposition = 'connected' WHERE id = ?").run(b); // now included
+  db.prepare("UPDATE calls SET source = 'manual' WHERE id = ?").run(c); // now included
+  db.prepare('UPDATE calls SET user_id = ? WHERE id = ?').run(db.prepare("SELECT id FROM users WHERE role = 'agent'").get().id, a);
+  eq('after disposition/source/user updates');
+  db.prepare("UPDATE calls SET outcome = 'interested' WHERE id = ?").run(b); // rollup-irrelevant column
+  eq('after an irrelevant update');
+  db.prepare('DELETE FROM calls WHERE id IN (?, ?, ?)').run(a, b, c);
+  eq('after deletes');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM calls_daily WHERE day = '2026-09-01' AND user_id = ?").get(u).n, 0, 'empty bucket removed');
+});
+
+test('018 statements are idempotent: re-running the whole file (minus ADD COLUMN) is a no-op', () => {
+  const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, '018_wave2.sql'), 'utf8');
+  const rest = sql.split('\n').filter((l) => !/^\s*ALTER TABLE/i.test(l)).join('\n');
+  const snapshot = () => ({
+    phones: db.prepare('SELECT * FROM lead_phones ORDER BY id').all(),
+    rollup: db.prepare(ROLLUP_SQL).all(),
+    objects: db.prepare("SELECT type, name FROM sqlite_master WHERE name LIKE 'trg_%' OR name LIKE 'idx_lead_phones%' OR name LIKE 'leads_fts%' OR name LIKE 'calls_daily%' ORDER BY 1, 2").all(),
+    fts: db.prepare('SELECT rowid FROM leads_fts WHERE leads_fts MATCH ? ORDER BY rowid').all('"lead"*').length,
+  });
+  const before = snapshot();
+  assert.doesNotThrow(() => db.exec(rest));
+  assert.deepEqual(snapshot(), before);
 });
 
 test('017 index/table statements are idempotent (re-running them is a no-op)', () => {

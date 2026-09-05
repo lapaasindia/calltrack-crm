@@ -1,4 +1,5 @@
 import express, { Router } from 'express';
+import { invalidateOnWrite } from '../lib/cache.js';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { normalizePhone } from '../lib/phone.js';
@@ -7,6 +8,8 @@ import { assignRoundRobin } from '../lib/assignment.js';
 import { recalcLeadScore } from '../lib/scoring.js';
 
 const router = Router();
+// A lead import changes lead counts/top performers → drop the cache (SCALE-12).
+router.use(invalidateOnWrite);
 router.use(requireAdmin);
 // Imports are the one endpoint that legitimately carries a big JSON body
 // (20k mapped rows). Per-route limit (SCALE-24); no-op until app.js narrows

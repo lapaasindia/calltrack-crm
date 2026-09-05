@@ -5,7 +5,7 @@ import { requireAdmin, revokeUserCredentials } from '../middleware/auth.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { logAudit } from '../lib/audit.js';
 import { ROLES, isOwner, isAdmin } from '../lib/permissions.js';
-import { passwordPolicyError } from './auth.js';
+import { passwordPolicyError, BCRYPT_ROUNDS } from './auth.js';
 
 const router = Router();
 
@@ -52,7 +52,7 @@ router.get('/', (req, res) => {
 // Everything below manages the team — admin tier only.
 router.use(requireAdmin);
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const username = String(req.body.username || '').trim();
   const full_name = String(req.body.full_name || '').trim();
   const password = String(req.body.password || '');
@@ -70,10 +70,12 @@ router.post('/', (req, res) => {
     return res.status(403).json({ error: 'Only an owner can grant admin/super_admin' });
   }
 
+  // Async hash (SCALE-4): ~60 ms of CPU that used to block every other request.
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   try {
     const info = db.prepare(
       'INSERT INTO users (username, password_hash, full_name, role, department, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(username, bcrypt.hashSync(password, 10), full_name, role, department, nowUtc());
+    ).run(username, passwordHash, full_name, role, department, nowUtc());
     logAudit({
       action: 'EMPLOYEE_CREATED', user: req.user, entity_type: 'user',
       entity_id: info.lastInsertRowid, details: { username, full_name, role, department }, ip: req.ip,
@@ -87,7 +89,7 @@ router.post('/', (req, res) => {
   }
 });
 
-router.patch('/:id', (req, res) => {
+router.patch('/:id', async (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -147,8 +149,9 @@ router.patch('/:id', (req, res) => {
     if (pwError) return res.status(400).json({ error: pwError });
     // An admin-set password is temporary — force the user to pick their own on
     // next login (audit H-1, defense in depth for reset accounts).
+    const newHash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?')
-      .run(bcrypt.hashSync(pw, 10), user.id);
+      .run(newHash, user.id);
     changed.push('password');
     // An admin reset means the old credential is no longer trusted: drop the
     // user's paired phones and every browser session (SEC-5). If the admin is

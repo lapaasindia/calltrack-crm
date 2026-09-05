@@ -159,7 +159,11 @@ function tooManyAttempts(res, sec) {
 // Constant-time-ish login (SEC-11): when the username is unknown we still run
 // a bcrypt compare against this fixed hash, so an unknown name costs the same
 // wall time as a wrong password and usernames can't be enumerated by timing.
+// (Computed once at module load — the only sync bcrypt call left; every
+// per-request hash/compare is async so a login burst never blocks the event
+// loop for ~60 ms apiece — SCALE-4.)
 const DUMMY_HASH = bcrypt.hashSync('calltrack-dummy-timing-password', 10);
+export const BCRYPT_ROUNDS = 10;
 
 // Exchange a one-time pairing code (from the admin's QR) for a long-lived
 // device token. The raw token is returned exactly once; only its hash is kept.
@@ -230,7 +234,7 @@ router.post('/pair', (req, res) => {
   res.json({ token, device_id: result.deviceId, user: result.user });
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   // Cap the username before it is used or logged, so a flood can't store
   // arbitrarily long attacker strings in audit_logs (audit L-7).
   const username = String(req.body.username || '').trim().slice(0, 80);
@@ -242,10 +246,12 @@ router.post('/login', (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   // Always pay the bcrypt cost (SEC-11): compare against the real hash when the
-  // user exists, else against a dummy hash whose result is discarded.
+  // user exists, else against a dummy hash whose result is discarded. Async
+  // (SCALE-4): the hashing runs off the event loop via bcryptjs' setImmediate
+  // slices; a rejection is turned into a JSON 500 by lib/asyncRoutes.js.
   const passwordOk = user
-    ? bcrypt.compareSync(password, user.password_hash)
-    : (bcrypt.compareSync(password, DUMMY_HASH), false);
+    ? await bcrypt.compare(password, user.password_hash)
+    : (await bcrypt.compare(password, DUMMY_HASH), false);
   if (!user || !user.is_active || !passwordOk) {
     const lockSec = recordLoginFailure(req.ip, username, !!user);
     logAudit({
@@ -290,18 +296,19 @@ router.get('/me', requireAuth, (req, res) => {
   res.json(req.user);
 });
 
-router.post('/change-password', requireAuth, (req, res) => {
+router.post('/change-password', requireAuth, async (req, res) => {
   const { current_password, new_password } = req.body;
   const pw = String(new_password || '');
   const policyError = passwordPolicyError(pw, req.user.username);
   if (policyError) return res.status(400).json({ error: policyError });
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!bcrypt.compareSync(String(current_password || ''), user.password_hash)) {
+  if (!(await bcrypt.compare(String(current_password || ''), user.password_hash))) {
     return res.status(401).json({ error: 'Current password is wrong' });
   }
+  const newHash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
   // Clear must_change_password: this lifts the change-password lockout (H-1).
   db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
-    .run(bcrypt.hashSync(pw, 10), req.user.id);
+    .run(newHash, req.user.id);
   // A password change is the "someone has my password" response: cut off every
   // OTHER credential this account holds — paired-phone tokens and other browser
   // sessions — while keeping the session that made the change (SEC-5).

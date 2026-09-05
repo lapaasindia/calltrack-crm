@@ -10,6 +10,7 @@ import db, { getSetting } from '../db.js';
 import { nowUtc, todayIst, addDays } from './istTime.js';
 import { RECORDINGS_BASE } from '../routes/sync.js';
 import { runJob, isShuttingDown } from './jobs.js';
+import { resolveFfmpeg } from './transcode.js';
 
 const execFileP = promisify(execFile);
 
@@ -17,7 +18,10 @@ const execFileP = promisify(execFile);
 const WHISPER_BIN = process.env.WHISPER_BIN || 'whisper-cli';
 const WHISPER_MODEL = process.env.WHISPER_MODEL
   || path.join(os.homedir(), '.calltrack-build', 'whisper-models', 'ggml-large-v3-turbo-q5_0.bin');
-const FFMPEG_BIN = process.env.FFMPEG_BIN || 'ffmpeg';
+// Resolved like the transcoder does (FFMPEG_BIN → /opt/homebrew/bin →
+// /usr/local/bin → PATH): under launchd PATH lacks Homebrew, so a bare
+// 'ffmpeg' used to fail every recording on the office Mac.
+const FFMPEG_BIN = resolveFfmpeg() || process.env.FFMPEG_BIN || 'ffmpeg';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
 

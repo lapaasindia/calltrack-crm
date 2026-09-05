@@ -2,12 +2,17 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import {
-  todayIst, istDayBounds, istRangeBounds, istWeekRange, istMonthRange, addDays, SQL_IST_DATE,
+  todayIst, istDayBounds, istRangeBounds, istWeekRange, istMonthRange, addDays,
 } from '../lib/istTime.js';
 import { loadOpenInstallments } from '../lib/installmentDues.js';
 import { RR_ROLES } from '../lib/assignment.js';
+import { cached } from '../lib/cache.js';
+import { isAdmin } from '../lib/permissions.js';
 
 const router = Router();
+// Cache scope for the polled aggregates (SCALE-12): the leaderboard is the
+// same payload for everyone; the admin-only routes are team-wide.
+const teamScope = (req) => (isAdmin(req.user.role) ? 'team' : `u:${req.user.id}`);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Who competes on the leaderboard: the round-robin calling roles (shared with
@@ -48,13 +53,31 @@ function sendMaybeCsv(req, res, rows, filename) {
 
 // Leaderboard is visible to the whole team (it's a motivation board).
 // period: today | week | month
-router.get('/leaderboard', (req, res) => {
+router.get('/leaderboard', cached('reports/leaderboard', () => 'all'), (req, res) => {
   const today = todayIst();
   let from = today;
   let to = today;
   if (req.query.period === 'week') [from, to] = istWeekRange(today);
   else if (req.query.period === 'month') [from, to] = istMonthRange(today);
   const { startUtc, endUtc } = istRangeBounds(from, to);
+
+  // Dials/connects come from the calls_daily rollup (migration 018, SCALE-12).
+  // unique_leads is a COUNT(DISTINCT) — additive across days only for a
+  // single-day period, so week/month still count distinct leads over calls
+  // (an indexed range scan, not the old full scan).
+  const singleDay = from === to;
+  const callsSub = singleDay
+    ? `SELECT user_id, SUM(dials) AS dials, SUM(connects) AS connects, SUM(unique_leads) AS unique_leads
+         FROM calls_daily WHERE day >= ? AND day <= ? GROUP BY user_id`
+    : `SELECT cd.user_id, cd.dials, cd.connects, COALESCE(ul.unique_leads, 0) AS unique_leads
+         FROM (SELECT user_id, SUM(dials) AS dials, SUM(connects) AS connects
+                 FROM calls_daily WHERE day >= ? AND day <= ? GROUP BY user_id) cd
+         LEFT JOIN (SELECT user_id, COUNT(DISTINCT lead_id) AS unique_leads
+                      FROM calls WHERE called_at >= ? AND called_at < ?
+                        AND (auto_logged = 0 OR disposition = 'connected')
+                        AND source != 'whatsapp'
+                     GROUP BY user_id) ul ON ul.user_id = cd.user_id`;
+  const callsParams = singleDay ? [from, to] : [from, to, startUtc, endUtc];
 
   const rows = db.prepare(
     `SELECT u.id, u.full_name,
@@ -66,14 +89,7 @@ router.get('/leaderboard', (req, res) => {
        COALESCE(p.collected_paise, 0) AS collected_paise,
        t.calls_target, t.connects_target, t.deals_target
      FROM users u
-     LEFT JOIN (
-       SELECT user_id, COUNT(*) AS dials, SUM(disposition = 'connected') AS connects,
-              COUNT(DISTINCT lead_id) AS unique_leads
-       FROM calls WHERE called_at >= ? AND called_at < ?
-         AND (auto_logged = 0 OR disposition = 'connected')
-         AND source != 'whatsapp'
-       GROUP BY user_id
-     ) c ON c.user_id = u.id
+     LEFT JOIN (${callsSub}) c ON c.user_id = u.id
      LEFT JOIN (
        SELECT created_by, COUNT(*) AS deals, SUM(deal_value_paise) AS deal_value_paise
        FROM deals WHERE won_date >= ? AND won_date <= ? AND status != 'cancelled' GROUP BY created_by
@@ -88,7 +104,7 @@ router.get('/leaderboard', (req, res) => {
      )
      WHERE u.is_active = 1 AND u.role IN (${LEADERBOARD_ROLES.map(() => '?').join(',')})
      ORDER BY dials DESC, connects DESC`
-  ).all(startUtc, endUtc, from, to, from, to, to, ...LEADERBOARD_ROLES);
+  ).all(...callsParams, from, to, from, to, to, ...LEADERBOARD_ROLES);
 
   // Targets are daily — scale to the period length for week/month views.
   const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
@@ -109,18 +125,16 @@ router.use(requireAdmin);
 // Per-agent per-IST-day activity.
 router.get('/agent-daily', (req, res) => {
   const { from, to, startUtc, endUtc } = dateRange(req);
+  // Straight from the calls_daily rollup (migration 018, SCALE-12): one row
+  // per (agent, IST day) already holds dials / connects / distinct leads.
   const rows = db.prepare(
-    `SELECT ${SQL_IST_DATE('c.called_at')} AS day, u.full_name AS agent,
-       COUNT(*) AS dials,
-       SUM(c.disposition = 'connected') AS connects,
-       COUNT(DISTINCT c.lead_id) AS unique_leads,
-       ROUND(100.0 * SUM(c.disposition = 'connected') / COUNT(*)) AS connect_rate_pct
-     FROM calls c JOIN users u ON u.id = c.user_id
-     WHERE c.called_at >= ? AND c.called_at < ?
-       AND (c.auto_logged = 0 OR c.disposition = 'connected')
-       AND c.source != 'whatsapp'
-     GROUP BY day, u.id ORDER BY day DESC, dials DESC`
-  ).all(startUtc, endUtc);
+    `SELECT cd.day, u.full_name AS agent,
+       cd.dials, cd.connects, cd.unique_leads,
+       ROUND(100.0 * cd.connects / cd.dials) AS connect_rate_pct
+     FROM calls_daily cd JOIN users u ON u.id = cd.user_id
+     WHERE cd.day >= ? AND cd.day <= ? AND cd.dials > 0
+     ORDER BY cd.day DESC, cd.dials DESC`
+  ).all(from, to);
 
   // Conversions per agent per day (won_date is already an IST date).
   const deals = db.prepare(
@@ -223,13 +237,10 @@ router.get('/sources', (req, res) => {
 router.get('/daily-trend', (req, res) => {
   const { from, to, startUtc, endUtc } = dateRange(req);
   const calls = db.prepare(
-    `SELECT ${SQL_IST_DATE('called_at')} AS day, COUNT(*) AS dials,
-            SUM(disposition = 'connected') AS connects
-     FROM calls WHERE called_at >= ? AND called_at < ?
-       AND (auto_logged = 0 OR disposition = 'connected')
-       AND source != 'whatsapp'
-     GROUP BY day ORDER BY day`
-  ).all(startUtc, endUtc);
+    `SELECT day, SUM(dials) AS dials, SUM(connects) AS connects
+       FROM calls_daily WHERE day >= ? AND day <= ?
+      GROUP BY day ORDER BY day`
+  ).all(from, to);
   const deals = db.prepare(
     `SELECT won_date AS day, COUNT(*) AS deals FROM deals
      WHERE won_date >= ? AND won_date <= ? AND status != 'cancelled' GROUP BY won_date`
@@ -254,18 +265,15 @@ router.get('/daily-trend', (req, res) => {
 });
 
 // Admin dashboard summary tiles.
-router.get('/summary', (req, res) => {
+router.get('/summary', cached('reports/summary', teamScope), (req, res) => {
   const today = todayIst();
-  const { startUtc, endUtc } = istDayBounds(today);
   const [mFrom, mTo] = istMonthRange(today);
   const monthBounds = istRangeBounds(mFrom, mTo);
 
   const callsToday = db.prepare(
-    `SELECT COUNT(*) AS dials, COALESCE(SUM(disposition='connected'),0) AS connects
-     FROM calls WHERE called_at >= ? AND called_at < ?
-       AND (auto_logged = 0 OR disposition = 'connected')
-       AND source != 'whatsapp'`
-  ).get(startUtc, endUtc);
+    `SELECT COALESCE(SUM(dials), 0) AS dials, COALESCE(SUM(connects), 0) AS connects
+       FROM calls_daily WHERE day = ?`
+  ).get(today);
   const dealsToday = db.prepare(
     "SELECT COUNT(*) AS n, COALESCE(SUM(deal_value_paise),0) AS value FROM deals WHERE won_date = ? AND status != 'cancelled'"
   ).get(today);

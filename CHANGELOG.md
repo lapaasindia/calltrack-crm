@@ -80,6 +80,51 @@ CI and docs). Finding ids (`SEC-`, `SCALE-`, `CLIENT-`, `MOB-`, `DESK-`, `DEP-`,
 - Pairing: QR/urls use `https://` on a TLS server (MOB-9); `/pair` validates
   `android_id`, accepts `device_model`, and successful pairings no longer count
   against the per-IP limit (MOB-20).
+- **Wave 2 (deferred audit items), migration 018 (additive, ~1.2 s on a 113 MB /
+  200k-call database):**
+  - Recordings the WebView / Safari cannot play (`.amr`, `.3gp`, `.ogg`, `.opus`)
+    are transcoded in the background to an `.m4a` sibling
+    (`ffmpeg -vn -c:a aac -b:a 64k`; `lib/transcode.js`, serial, job-tracked,
+    boot sweep + every 10 min for older uploads). `GET /api/review/audio/:id`
+    serves the sibling with an explicit `Content-Type` (`audio/mp4`, `audio/amr`…,
+    Range unchanged) and answers 404 instead of 500 for purged audio; review
+    `/recordings`, `/untagged`, the lead page and the upload response carry
+    `playable` / `playable_ext` (`recording_playable*`). ffmpeg is resolved via
+    `FFMPEG_BIN` → `/opt/homebrew/bin` → `/usr/local/bin` → `PATH` (launchd has no
+    Homebrew on PATH — the AI pipeline now uses the same resolver); without it
+    transcoding is skipped and logged once (MOB-22).
+  - `lead_phones` history (`primary` / `alt` / `previous`, trigger-maintained,
+    backfilled): editing a lead's phone keeps the old number attached — synced
+    calls from it still land on the same lead (a live lead whose *current* phone
+    is that number wins), review candidates say `match: 'previous'`, exact-phone
+    search finds alt and previous numbers, soft-deleting a lead closes its rows
+    (SCALE-18b).
+  - `GET /api/leads?q=` uses an FTS5 index (`leads_fts` over name/city/email/notes/
+    phone, external-content, Devanagari-aware tokenizer) as a sanitised prefix
+    query — word order no longer matters, notes are searchable, Hindi names are
+    single tokens; digit fragments keep the substring path, full numbers keep
+    exact-phone semantics; falls back to LIKE if the table is missing. Response
+    adds `search_mode` and a keyset `next_cursor` (`?cursor=`) next to the
+    unchanged page/total fields (SCALE-5).
+  - `calls_daily(user_id, day, dials, connects, unique_leads)` rollup maintained
+    by triggers (bucket recompute, IST day, same reporting rule) feeds the
+    dashboard KPIs / top performers, agent-daily, daily-trend, summary and the
+    leaderboard; a 30 s in-memory cache (`X-Cache: HIT|MISS`, per user scope,
+    dropped on every successful write) fronts `/api/dashboard`,
+    `/api/reports/summary`, `/api/reports/leaderboard`, `/api/coaching/leaderboard`.
+    Benchmark (50k leads / 200k calls): dashboard 86 → 18 ms cold / 1 ms warm,
+    365-day dashboard 270 → 54 / 1 ms, 2-year agent-daily 251 → 15 ms,
+    20 concurrent dashboards 1648 → 372 ms cold / 31 ms warm (SCALE-12).
+  - `GET /api/whatsapp/contacts/:id/messages?before=<id>&limit=<1..200>` pages a
+    thread newest-first (`has_more`, `next_before`); without params the whole
+    thread is returned up to 500 messages, else the newest 500 + `has_more`.
+    `GET /api/invoices` and `GET /api/tasks` accept `?limit&offset` and return
+    `{rows, total, limit, offset}` (bare array + `X-Total-Count` without them).
+  - bcrypt hash/compare are async in login, change-password, user create and
+    admin reset — a login burst no longer blocks the event loop (SCALE-4).
+  - Recording retention actually marks purged rows now (`file_path = ''`; the
+    old `SET file_path = NULL` violated NOT NULL and was swallowed) and removes
+    the `.m4a` sibling. `GET /api/ops/health` reports `transcode` and `cache`.
 
 ### Client (web)
 - **Crashes / data bugs** — CLIENT-4/QA-1 closing the Project details modal no

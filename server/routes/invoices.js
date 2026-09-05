@@ -15,10 +15,12 @@ import { logAudit } from '../lib/audit.js';
 import { isAdmin } from '../lib/permissions.js';
 // One money bound shared with deals/products/catalog: ₹100 crore (1e11 paise).
 import { MAX_PAISE } from './catalog.js';
+import { pagingOf } from '../lib/paging.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = ['draft', 'sent', 'paid', 'cancelled'];
+
 // Final states an invoice can't transition out of (only re-set to itself).
 const TERMINAL_STATUSES = ['paid', 'cancelled'];
 
@@ -221,14 +223,24 @@ router.get('/', (req, res) => {
   if (req.query.deleted === '1' && isAdmin(req.user.role)) where.push('i.deleted_at IS NOT NULL');
   else where.push('i.deleted_at IS NULL');
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  // Optional paging (SCALE-5): `?limit=<1..500>&offset=<n>` → { rows, total,
+  // limit, offset }. Without either param the legacy bare array is returned
+  // (existing clients), with the count in X-Total-Count either way.
+  const paging = pagingOf(req.query, { defaultLimit: 500, maxLimit: 500 });
+  const total = db.prepare(
+    `SELECT COUNT(*) AS n FROM invoices i LEFT JOIN leads l ON l.id = i.lead_id ${whereSql}`
+  ).get(...params).n;
   const rows = db.prepare(
     `SELECT i.*, l.name AS lead_name
      FROM invoices i
      LEFT JOIN leads l ON l.id = i.lead_id
      ${whereSql}
-     ORDER BY i.created_at DESC, i.id DESC`
-  ).all(...params);
-  res.json(rows);
+     ORDER BY i.created_at DESC, i.id DESC
+     LIMIT ? OFFSET ?`
+  ).all(...params, paging.explicit ? paging.limit : -1, paging.explicit ? paging.offset : 0);
+  res.set('X-Total-Count', String(total));
+  if (!paging.explicit) return res.json(rows);
+  res.json({ rows, total, limit: paging.limit, offset: paging.offset });
 });
 
 // ---------- DETAIL ----------

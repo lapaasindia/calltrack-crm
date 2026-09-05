@@ -10,6 +10,7 @@ import db from '../db.js';
 import { isAdmin } from '../lib/permissions.js';
 import { nowUtc, todayIst, istRangeBounds, addDays } from '../lib/istTime.js';
 import { getDailyCoaching, gradeFor } from '../lib/coaching.js';
+import { cached } from '../lib/cache.js';
 
 const router = Router();
 
@@ -42,7 +43,11 @@ router.get('/daily', (req, res) => {
 
 // Team leaderboard: each active agent/caller's avg overall rating over the last
 // `days` (default 7) ending at `date`, sorted best-first. Admin tier only.
-router.get('/leaderboard', (req, res) => {
+// Cached 30 s (SCALE-12). The scope MUST split admin tier from everyone else:
+// the 403 below runs after the cache lookup, so a shared key would hand a
+// caller the team's cached payload.
+const boardScope = (req) => (isAdmin(req.user.role) ? 'team' : `u:${req.user.id}`);
+router.get('/leaderboard', cached('coaching/leaderboard', boardScope), (req, res) => {
   if (!isAdmin(req.user.role)) return res.status(403).json({ error: 'Admin only' });
   const date = DATE_RE.test(req.query.date || '') ? req.query.date : todayIst();
   const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
