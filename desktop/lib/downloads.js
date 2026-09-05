@@ -1,6 +1,6 @@
-// Cross-platform download filename helpers for the desktop shell, factored out
-// of main.js so they unit-test under node:test without launching Electron (no
-// electron / fs import — the caller injects an `exists` predicate).
+// Cross-platform download filename / policy helpers for the desktop shell,
+// factored out of main.js so they unit-test under node:test without launching
+// Electron (no electron / fs import — the caller injects an `exists` predicate).
 //
 // The names these see are app-controlled today (e.g.
 // 'funnel-2026-05-20-to-2026-06-18.csv'), so sanitizing rarely fires — it is
@@ -58,4 +58,49 @@ export function dedupeFilename(name, exists) {
     if (!exists(candidate)) return candidate;
   }
   return `${stem} (${Date.now()})${ext}`; // pathological fallback
+}
+
+// ---- Download type policy (DESK-9) -----------------------------------------
+// Only these extensions are saved SILENTLY to the Downloads folder (and
+// revealed). They are the document/data/media types the CRM itself produces
+// (CSV/XLSX reports, PDF invoices, SQLite backups, JSON exports, call
+// recordings). Anything else — .exe, .lnk, .scr, .dmg, .js, .html, .bat … —
+// goes through the OS Save dialog so the user sees the name and extension,
+// and is never auto-revealed with a "double-click me" highlight.
+export const SILENT_SAVE_EXTENSIONS = new Set([
+  'csv', 'xlsx', 'xls', 'pdf', 'sqlite', 'json', 'zip', 'txt',
+  'png', 'jpg', 'jpeg', 'webp',
+  'm4a', 'mp3', 'wav', 'amr', '3gp', 'opus', 'ogg',
+]);
+
+export function extensionOf(name) {
+  const safe = sanitizeFilename(name);
+  const [, ext] = splitName(safe);
+  return ext ? ext.slice(1).toLowerCase() : '';
+}
+
+// 'silent' → save straight to Downloads with a deduped name and reveal it;
+// 'ask'    → let Chromium show the Save dialog (no reveal afterwards).
+// Double extensions are judged by the LAST one only ('Invoice.pdf.exe' → exe → ask).
+export function downloadPolicy(name) {
+  return SILENT_SAVE_EXTENSIONS.has(extensionOf(name)) ? 'silent' : 'ask';
+}
+
+// ---- Partial-download detection (DEP-5) -------------------------------------
+// Chromium writes in-flight downloads as '<name>.crdownload' (Windows/macOS);
+// other builds/OSes use '.part' / '.tmp' / '.download'. A directory scan that
+// prefix-matches on the final name sees these and must NOT treat them as done.
+const PARTIAL_SUFFIX = /\.(crdownload|part|tmp|download)$/i;
+
+export function isPartialDownload(name) {
+  return PARTIAL_SUFFIX.test(String(name == null ? '' : name));
+}
+
+// Given a directory listing, which of the expected name prefixes have a
+// COMPLETE file? Pure so the smoke's wait loop is unit-testable.
+export function completedDownloads(files, prefixes) {
+  const finished = (files || []).filter((f) => !isPartialDownload(f));
+  const seen = {};
+  for (const p of prefixes) seen[p] = finished.some((f) => f.startsWith(p));
+  return seen;
 }

@@ -234,21 +234,23 @@ test('timer start moves To Do→Doing; stop appends a time_entry and increments 
   assert.equal(start.data.board_status, 'Doing');
   assert.equal(db.prepare('SELECT board_status FROM tasks WHERE id = ?').get(id).board_status, 'Doing');
 
-  // Stop with a start 90s in the past → a ~90s entry.
-  const startIso = new Date(Date.now() - 90000).toISOString();
+  // The server owns the start instant (SCALE-22). Backdate it 90 s and stop →
+  // a ~90 s entry, regardless of any client-supplied start_iso.
+  assert.equal(db.prepare('SELECT timer_started_at FROM tasks WHERE id = ?').get(id).timer_started_at, start.data.started);
+  db.prepare('UPDATE tasks SET timer_started_at = ? WHERE id = ?')
+    .run(new Date(Date.now() - 90000).toISOString(), id);
   const stop = await api(`/api/tasks/${id}/timer/stop`, {
-    method: 'POST', cookie: headACookie, body: { start_iso: startIso },
+    method: 'POST', cookie: headACookie, body: { start_iso: new Date(Date.now() - 3600e3).toISOString() },
   });
   assert.equal(stop.status, 200);
   assert.ok(stop.data.duration >= 89 && stop.data.duration <= 95, `~90s, got ${stop.data.duration}`);
-  const row = db.prepare('SELECT time_tracked, time_entries FROM tasks WHERE id = ?').get(id);
+  const row = db.prepare('SELECT time_tracked, time_entries, timer_started_at FROM tasks WHERE id = ?').get(id);
   assert.equal(row.time_tracked, stop.data.duration);
   assert.equal(JSON.parse(row.time_entries).length, 1);
+  assert.equal(row.timer_started_at, null, 'start cleared on stop');
 
-  // A non-positive duration (start in the future) is ignored — no new entry.
-  const ignored = await api(`/api/tasks/${id}/timer/stop`, {
-    method: 'POST', cookie: headACookie, body: { start_iso: new Date(Date.now() + 60000).toISOString() },
-  });
+  // Stop is idempotent: a second stop (double-click / retry) adds nothing.
+  const ignored = await api(`/api/tasks/${id}/timer/stop`, { method: 'POST', cookie: headACookie });
   assert.equal(ignored.data.duration, 0);
   assert.equal(JSON.parse(db.prepare('SELECT time_entries FROM tasks WHERE id = ?').get(id).time_entries).length, 1);
 });

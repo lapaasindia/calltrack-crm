@@ -36,9 +36,15 @@ function getPricingConfig() {
 }
 
 // Parse + validate an integer-paise value. Returns null when invalid; 0 is OK.
+// Bounded like deals/invoices (audit M-6 / SEC-9): the SAME constant as
+// deals.js / invoices.js (1e11 paise = ₹100 crore; their comment says "10
+// crore" but the value is 100) and a safe integer, so pricing aggregates never
+// silently lose precision. products.js imports this one.
+export const MAX_PAISE = 100_00_00_000 * 100;
 function toPaise(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
+  if (!Number.isSafeInteger(n) || n > MAX_PAISE) return null;
   return n;
 }
 
@@ -80,7 +86,7 @@ router.post('/services', (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Service name required' });
   const price = toPaise(req.body.base_price_paise ?? 0);
-  if (price === null) return res.status(400).json({ error: 'base_price_paise must be a non-negative integer (paise)' });
+  if (price === null) return res.status(400).json({ error: 'base_price_paise must be a non-negative integer (paise, at most ₹100 crore)' });
   const info = db.prepare(
     `INSERT INTO services (name, slug, category, base_price_paise, term_multipliers, is_active, sort_order, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -107,7 +113,7 @@ router.put('/services/:id', (req, res) => {
   let price = svc.base_price_paise;
   if (req.body.base_price_paise !== undefined) {
     price = toPaise(req.body.base_price_paise);
-    if (price === null) return res.status(400).json({ error: 'base_price_paise must be a non-negative integer (paise)' });
+    if (price === null) return res.status(400).json({ error: 'base_price_paise must be a non-negative integer (paise, at most ₹100 crore)' });
   }
   const slug = req.body.slug !== undefined ? (String(req.body.slug).trim() || null) : svc.slug;
   const category = req.body.category !== undefined ? (String(req.body.category).trim() || null) : svc.category;
@@ -139,7 +145,7 @@ router.post('/addons', (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Add-on name required' });
   const price = toPaise(req.body.price_paise ?? 0);
-  if (price === null) return res.status(400).json({ error: 'price_paise must be a non-negative integer (paise)' });
+  if (price === null) return res.status(400).json({ error: 'price_paise must be a non-negative integer (paise, at most ₹100 crore)' });
   const info = db.prepare(
     `INSERT INTO service_addons (name, slug, price_paise, icon, is_active, sort_order, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -165,7 +171,7 @@ router.put('/addons/:id', (req, res) => {
   let price = addon.price_paise;
   if (req.body.price_paise !== undefined) {
     price = toPaise(req.body.price_paise);
-    if (price === null) return res.status(400).json({ error: 'price_paise must be a non-negative integer (paise)' });
+    if (price === null) return res.status(400).json({ error: 'price_paise must be a non-negative integer (paise, at most ₹100 crore)' });
   }
   const slug = req.body.slug !== undefined ? (String(req.body.slug).trim() || null) : addon.slug;
   const icon = req.body.icon !== undefined ? (String(req.body.icon).trim() || null) : addon.icon;
@@ -198,7 +204,7 @@ router.put('/pricing-config', (req, res) => {
     const name = String(t?.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Each platform tier needs a name' });
     const price = toPaise(t?.price_paise ?? 0);
-    if (price === null) return res.status(400).json({ error: `Tier "${name}": price_paise must be a non-negative integer (paise)` });
+    if (price === null) return res.status(400).json({ error: `Tier "${name}": price_paise must be a non-negative integer (paise, at most ₹100 crore)` });
     cleanTiers.push({
       key: t.key ? String(t.key).trim() : name.toLowerCase().replace(/\s+/g, '_'),
       name,
@@ -206,7 +212,7 @@ router.put('/pricing-config', (req, res) => {
     });
   }
   const rate = toPaise(body.bandwidth_rate_paise ?? 0);
-  if (rate === null) return res.status(400).json({ error: 'bandwidth_rate_paise must be a non-negative integer (paise)' });
+  if (rate === null) return res.status(400).json({ error: 'bandwidth_rate_paise must be a non-negative integer (paise, at most ₹100 crore)' });
 
   const cfg = {
     platform_tiers: cleanTiers.length ? cleanTiers : DEFAULT_PRICING_CONFIG.platform_tiers,

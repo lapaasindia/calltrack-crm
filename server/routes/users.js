@@ -1,16 +1,41 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, revokeUserCredentials } from '../middleware/auth.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { logAudit } from '../lib/audit.js';
-import { ROLES, isOwner } from '../lib/permissions.js';
+import { ROLES, isOwner, isAdmin } from '../lib/permissions.js';
 import { passwordPolicyError } from './auth.js';
 
 const router = Router();
-router.use(requireAdmin);
 
+// Work still parked on a user — surfaced when they are deactivated so the UI
+// can prompt for reassignment (SCALE-20). Nothing is moved automatically.
+export function openWorkFor(userId) {
+  return {
+    leads: db.prepare(
+      "SELECT COUNT(*) n FROM leads WHERE assigned_to = ? AND deleted_at IS NULL AND stage NOT IN ('won','lost')"
+    ).get(userId).n,
+    follow_ups: db.prepare(
+      "SELECT COUNT(*) n FROM follow_ups WHERE assigned_to = ? AND status = 'pending'"
+    ).get(userId).n,
+    tasks: db.prepare(
+      "SELECT COUNT(*) n FROM tasks WHERE assigned_to = ? AND status = 'pending'"
+    ).get(userId).n,
+  };
+}
+
+// Team directory. Admin tier gets the full management payload (username,
+// active flag, department, targets). Everyone else — meeting attendee pickers,
+// "assigned to" labels — gets only {id, full_name, role} of ACTIVE users
+// (CLIENT-29): enough to pick a colleague, nothing to manage them with.
 router.get('/', (req, res) => {
+  if (!isAdmin(req.user.role)) {
+    const rows = db.prepare(
+      'SELECT id, full_name, role FROM users WHERE is_active = 1 ORDER BY role, full_name'
+    ).all();
+    return res.json(rows);
+  }
   const users = db.prepare(
     `SELECT u.id, u.username, u.full_name, u.role, u.is_active, u.department, u.created_at,
             t.calls_target, t.connects_target, t.deals_target
@@ -23,6 +48,9 @@ router.get('/', (req, res) => {
   ).all(todayIst());
   res.json(users);
 });
+
+// Everything below manages the team — admin tier only.
+router.use(requireAdmin);
 
 router.post('/', (req, res) => {
   const username = String(req.body.username || '').trim();
@@ -73,6 +101,8 @@ router.patch('/:id', (req, res) => {
   }
 
   const changed = [];
+  let openWork = null;
+  let revoked = null;
   if (req.body.full_name !== undefined) {
     db.prepare('UPDATE users SET full_name = ? WHERE id = ?')
       .run(String(req.body.full_name).trim(), user.id);
@@ -104,6 +134,12 @@ router.patch('/:id', (req, res) => {
     }
     db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(active, user.id);
     changed.push('is_active');
+    if (!active) {
+      // Deactivation kills every live credential (SEC-5) and reports the work
+      // still parked on this user so the UI can prompt reassignment (SCALE-20).
+      revoked = revokeUserCredentials(user.id);
+      openWork = openWorkFor(user.id);
+    }
   }
   if (req.body.new_password !== undefined) {
     const pw = String(req.body.new_password);
@@ -114,14 +150,20 @@ router.patch('/:id', (req, res) => {
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?')
       .run(bcrypt.hashSync(pw, 10), user.id);
     changed.push('password');
+    // An admin reset means the old credential is no longer trusted: drop the
+    // user's paired phones and every browser session (SEC-5). If the admin is
+    // resetting their OWN password, keep the session doing it.
+    revoked = revokeUserCredentials(user.id, {
+      exceptSid: user.id === req.user.id ? req.session?.id : null,
+    });
   }
   if (changed.length) {
     logAudit({
       action: 'EMPLOYEE_UPDATED', user: req.user, entity_type: 'user',
-      entity_id: user.id, details: { fields: changed }, ip: req.ip,
+      entity_id: user.id, details: { fields: changed, ...(revoked || {}) }, ip: req.ip,
     });
   }
-  res.json({ ok: true });
+  res.json({ ok: true, ...(revoked || {}), ...(openWork ? { open_work: openWork } : {}) });
 });
 
 // Deactivate-as-delete: the schema has FK children (calls/leads/targets) so a
@@ -130,12 +172,20 @@ router.delete('/:id', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (user.id === req.user.id) return res.status(400).json({ error: 'You cannot delete yourself' });
+  // Managers may deactivate non-owners only (mirrors PATCH's owner guard).
+  if (isOwner(user.role) && !isOwner(req.user.role)) {
+    return res.status(403).json({ error: 'Only an owner can deactivate an admin/super_admin account' });
+  }
   db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(user.id);
+  const revoked = revokeUserCredentials(user.id);
+  const openWork = openWorkFor(user.id);
   logAudit({
     action: 'EMPLOYEE_DELETED', user: req.user, entity_type: 'user',
-    entity_id: user.id, details: { username: user.username }, ip: req.ip,
+    entity_id: user.id, details: { username: user.username, ...revoked, open_work: openWork }, ip: req.ip,
   });
-  res.json({ ok: true });
+  // open_work = leads / follow-ups / tasks still assigned to this user. Nothing
+  // is reassigned automatically — the UI prompts the admin (SCALE-20).
+  res.json({ ok: true, ...revoked, open_work: openWork });
 });
 
 // Set targets effective from a given IST date (defaults to today).

@@ -61,34 +61,20 @@ function buildKpis(scope, range) {
     admin ? [endUtc] : [endUtc, uid]
   ).n;
 
-  // Pipeline value (paise): open deals' deal_value_paise (status='active', i.e.
-  // not completed/cancelled) for leads still open, PLUS a fallback to the open
-  // leads' budget when they have no deal yet. We sum active deals first, then
-  // add budget only for open leads that have NO active deal (avoid double count).
-  const activeDealValue = scalar(
-    `SELECT COALESCE(SUM(d.deal_value_paise), 0) AS v
-       FROM deals d JOIN leads l ON l.id = d.lead_id AND l.deleted_at IS NULL
+  // Pipeline value (paise) = money still to be collected on open deals:
+  // each active deal's value MINUS what has already been paid on it (README
+  // "Pending = deal value − payments received"; SCALE-11). Collected money is
+  // revenue below, never pipeline. (The old per-request pragma_table_info
+  // probe for a leads.budget_paise column that no migration creates is gone.)
+  const pipelineValuePaise = scalar(
+    `SELECT COALESCE(SUM(MAX(d.deal_value_paise - COALESCE(pay.paid_paise, 0), 0)), 0) AS v
+       FROM deals d
+       JOIN leads l ON l.id = d.lead_id AND l.deleted_at IS NULL
+       LEFT JOIN (SELECT deal_id, SUM(amount_paise) AS paid_paise FROM payments GROUP BY deal_id) pay
+         ON pay.deal_id = d.id
       WHERE d.status = 'active' AND (${scope.dealsClause})`,
     admin ? [] : [uid]
   ).v;
-
-  // Open leads (not won/lost) with NO active deal → fall back to their budget.
-  // leads.budget_paise may not exist on every install; guard via column check.
-  const hasBudget = db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('leads') WHERE name = 'budget_paise'").get().n > 0;
-  let fallbackBudget = 0;
-  if (hasBudget) {
-    fallbackBudget = scalar(
-      `SELECT COALESCE(SUM(l.budget_paise), 0) AS v
-         FROM leads l
-        WHERE l.deleted_at IS NULL AND l.stage NOT IN ('won','lost')
-          AND (${scope.leadsClause})
-          AND NOT EXISTS (
-            SELECT 1 FROM deals d WHERE d.lead_id = l.id AND d.status = 'active'
-          )`,
-      admin ? [] : [uid]
-    ).v;
-  }
-  const pipelineValuePaise = activeDealValue + fallbackBudget;
 
   // Revenue (paise) = real cash actually collected in the range (payments).
   const revenuePaise = scalar(

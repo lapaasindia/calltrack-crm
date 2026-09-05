@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { loadLead } from '../middleware/auth.js';
+import { loadLead, requireWriter } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
 
 const router = Router({ mergeParams: true });
+router.use(requireWriter);
 
 // Schedule (or reschedule) a follow-up without logging a call.
 // One pending follow-up per lead: any existing pending one is replaced.

@@ -214,10 +214,13 @@ function attributionUser(db, lead) {
 // matching how server/routes/calls.js writes a note row. disposition is required
 // by the schema CHECK; we use 'connected' for a real contact event and tag the
 // row source='whatsapp'. Also bumps leads.last_contacted + recomputes the score.
-function mirrorToLead(db, leadId, msg, contact) {
-  if (!leadId) return;
+// `recalc:false` lets a batch ingest (history sync) rescore each lead ONCE
+// after the whole batch instead of re-reading all of the lead's calls per
+// message (SCALE-7). Returns the lead id it touched (or null).
+function mirrorToLead(db, leadId, msg, contact, { recalc = true } = {}) {
+  if (!leadId) return null;
   const lead = db.prepare('SELECT id, assigned_to FROM leads WHERE id = ?').get(leadId);
-  if (!lead) return;
+  if (!lead) return null;
   const userId = attributionUser(db, lead);
   const verb = msg.direction === 'incoming' ? 'incoming' : 'outgoing';
   const who = contact?.display_name || contact?.phone || jidToNumber(msg.jid) || 'contact';
@@ -231,16 +234,37 @@ function mirrorToLead(db, leadId, msg, contact) {
 
   db.prepare('UPDATE leads SET last_contacted = ?, updated_at = ? WHERE id = ?')
     .run(msg.sent_at, nowUtc(), leadId);
-  recalcLeadScore(db, leadId);
+  if (recalc) recalcLeadScore(db, leadId);
+  return leadId;
+}
+
+// raw_payload is kept for debugging/audit, but a media envelope carries base64
+// thumbnails and history sync replays thousands of them: cap at 4 KB for known
+// types (SCALE-7). Unknown types keep the full envelope — that's the only way
+// to find out what they were. Always valid JSON.
+export const RAW_PAYLOAD_CAP = 4096;
+export function capRawPayload(raw, messageType) {
+  const full = safeStringify(raw);
+  if (full == null) return null;
+  if (messageType === 'unknown' || full.length <= RAW_PAYLOAD_CAP) return full;
+  const summary = {
+    truncated: true,
+    bytes: full.length,
+    key: raw?.key ?? null,
+    messageTimestamp: raw?.messageTimestamp ?? null,
+    pushName: raw?.pushName ?? null,
+    message_keys: raw?.message && typeof raw.message === 'object' ? Object.keys(raw.message) : [],
+  };
+  return safeStringify(summary);
 }
 
 // Idempotent ingest of one extracted message. Upserts on wa_message_id, ensures
 // a contact exists, links the lead, mirrors to the lead timeline (only for a
 // linked lead), and bumps the contact's last_message_at. Returns
 // { message, contact, created } — created=false means it was a duplicate no-op.
-export function ingestMessage(db, extracted) {
+export function ingestMessage(db, extracted, { deferScore = false } = {}) {
   if (!extracted || !extracted.wa_message_id || !extracted.jid) {
-    return { message: null, contact: null, created: false };
+    return { message: null, contact: null, created: false, lead_id: null };
   }
 
   return db.transaction(() => {
@@ -249,7 +273,7 @@ export function ingestMessage(db, extracted) {
     const dup = db.prepare('SELECT * FROM wa_messages WHERE wa_message_id = ?')
       .get(extracted.wa_message_id);
     if (dup) {
-      return { message: dup, contact, created: false };
+      return { message: dup, contact, created: false, lead_id: contact.lead_id || null };
     }
 
     const now = nowUtc();
@@ -270,11 +294,30 @@ export function ingestMessage(db, extracted) {
         .run(extracted.sent_at, contact.id);
     }
 
-    mirrorToLead(db, contact.lead_id, extracted, contact);
+    const leadId = mirrorToLead(db, contact.lead_id, extracted, contact, { recalc: !deferScore });
 
     const message = db.prepare('SELECT * FROM wa_messages WHERE id = ?').get(info.lastInsertRowid);
     const freshContact = db.prepare('SELECT * FROM wa_contacts WHERE id = ?').get(contact.id);
-    return { message, contact: freshContact, created: true };
+    return { message, contact: freshContact, created: true, lead_id: leadId };
+  })();
+}
+
+// Ingest a whole messages.upsert batch (a live notify of a few messages, or a
+// history-sync 'append' of thousands) in ONE transaction, then rescore each
+// touched lead exactly once (SCALE-7). Returns counts.
+export function ingestBatch(db, extractedList) {
+  const list = Array.isArray(extractedList) ? extractedList.filter(Boolean) : [];
+  if (!list.length) return { created: 0, duplicates: 0, leads_rescored: 0 };
+  return db.transaction(() => {
+    let created = 0;
+    let duplicates = 0;
+    const leads = new Set();
+    for (const extracted of list) {
+      const r = ingestMessage(db, extracted, { deferScore: true });
+      if (r.created) { created += 1; if (r.lead_id) leads.add(r.lead_id); } else if (r.message) duplicates += 1;
+    }
+    for (const leadId of leads) recalcLeadScore(db, leadId);
+    return { created, duplicates, leads_rescored: leads.size };
   })();
 }
 
@@ -482,11 +525,19 @@ export async function startWhatsApp(db, {
     sock.ev.on('messages.upsert', (payload) => {
       try {
         if (!payload || (payload.type !== 'notify' && payload.type !== 'append')) return;
+        const batch = [];
         for (const raw of payload.messages || []) {
           const extracted = extractMessage(raw);
           if (!extracted) continue;
-          extracted.raw_payload = safeStringify(raw);
-          ingestMessage(db, extracted);
+          extracted.raw_payload = capRawPayload(raw, extracted.message_type);
+          batch.push(extracted);
+        }
+        // One transaction per batch + one rescore per lead: a history sync of
+        // thousands of messages no longer runs thousands of transactions and
+        // score recomputes on the event loop (SCALE-7).
+        const r = ingestBatch(db, batch);
+        if (payload.type === 'append' && r.created) {
+          log.info?.(`[whatsapp] history sync: ${r.created} messages, ${r.leads_rescored} leads rescored`);
         }
       } catch (err) {
         log.error?.('[whatsapp] messages.upsert handler error:', err.message);
@@ -564,6 +615,20 @@ export async function logoutWhatsApp(db) {
   } catch { /* ignore */ }
   runtime = null;
   setSessionState(db, { status: 'logged_out', qr_code: null });
+}
+
+// Graceful shutdown: close the live socket WITHOUT logging out (the session
+// stays paired and reconnects on the next boot). Best effort, never throws.
+export async function stopWhatsApp() {
+  const rt = runtime;
+  runtime = null;
+  if (!rt || !rt.sock) return false;
+  rt.stopping = true;
+  try {
+    if (typeof rt.sock.end === 'function') rt.sock.end(undefined);
+    else if (rt.sock.ws && typeof rt.sock.ws.close === 'function') rt.sock.ws.close();
+  } catch { /* ignore */ }
+  return true;
 }
 
 // Test hook: clear the module-level runtime so the next start is clean.

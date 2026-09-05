@@ -4,16 +4,13 @@
 // Intelligence panel. Callers see only their own numbers; the server enforces
 // scope — this page just renders what it gets. Money via rupees(paise); dates
 // via the api.js helpers. No chart library — all visuals are inline SVG/CSS.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, rupees, fmtDateTime, todayIstDate } from '../api.js';
-import { useApp } from '../App.jsx';
+import { api, rupees, fmtDateTime, todayIstDate, daysAgo, printUrl } from '../api.js';
+import { useApp } from '../ctx.js';
+import { useRequest } from '../hooks.js';
 import { isAdmin } from '../permissions.js';
-
-function daysAgo(n) {
-  const d = new Date(Date.now() - n * 86400000);
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
-}
+import { ErrorState, LoadingState } from '../components.jsx';
 
 const PRESETS = [
   { key: '7', label: '7 days', from: () => daysAgo(6) },
@@ -28,8 +25,8 @@ function StatCard({ label, value, sub, color = 'var(--brand)', onClick }) {
       className="card"
       onClick={onClick}
       style={{
-        padding: '14px 16px', margin: 0, textAlign: 'left', cursor: onClick ? 'pointer' : 'default',
-        border: '1px solid var(--line)', background: 'var(--card, #fff)', width: '100%',
+        padding: '14px 16px', margin: 0, cursor: onClick ? 'pointer' : 'default',
+        border: '1px solid var(--line)', background: 'var(--card)', width: '100%',
       }}
     >
       <div style={{ fontSize: 26, fontWeight: 800, color }}>{value}</div>
@@ -60,7 +57,6 @@ function TrendChart({ trend }) {
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Trend chart" style={{ display: 'block' }}>
-      {/* baseline */}
       <line x1={padL} y1={padT + innerH} x2={W - padR} y2={padT + innerH} stroke="var(--line)" strokeWidth="1" />
       {data.map((d, i) => {
         const x = padL + i * slot + slot / 2;
@@ -87,7 +83,7 @@ function TrendChart({ trend }) {
   );
 }
 
-function Legend() {
+function ChartLegend() {
   const item = (color, label) => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--ink-soft)' }}>
       <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
@@ -104,7 +100,7 @@ function Legend() {
 }
 
 const SENTIMENT_COLOR = {
-  positive: 'var(--green)', neutral: 'var(--ink-soft)', negative: 'var(--red)', mixed: 'var(--amber)',
+  positive: 'var(--green-text)', neutral: 'var(--ink-soft)', negative: 'var(--red-text)', mixed: 'var(--amber-text)',
 };
 
 function SentimentBar({ sentiment }) {
@@ -120,7 +116,7 @@ function SentimentBar({ sentiment }) {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 }}>
         {Object.entries(sentiment).map(([k, v]) => (
           <span key={k} style={{ fontSize: 11, color: 'var(--ink-soft)' }}>
-            <span style={{ color: SENTIMENT_COLOR[k] }}>●</span> {k} {v}
+            <span style={{ color: SENTIMENT_COLOR[k] }} aria-hidden="true">●</span> {k} {v}
           </span>
         ))}
       </div>
@@ -133,58 +129,57 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const admin = isAdmin(user.role);
   const [preset, setPreset] = useState('30');
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [printing, setPrinting] = useState(false);
 
   const range = useMemo(() => {
     const p = PRESETS.find((x) => x.key === preset) || PRESETS[1];
     return { from: p.from(), to: todayIstDate() };
   }, [preset]);
 
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    api.get(`/api/dashboard?from=${range.from}&to=${range.to}`)
-      .then((d) => { if (alive) { setData(d); setLoading(false); } })
-      .catch((e) => { if (alive) { setLoading(false); } showToast(e.message, 'error'); });
-    return () => { alive = false; };
-  }, [range.from, range.to, showToast]);
+  const { data, error, loading, reload } = useRequest(
+    ({ signal }) => api.get(`/api/dashboard?from=${range.from}&to=${range.to}`, { signal }), [range.from, range.to],
+  );
 
-  const k = data?.kpis;
+  const printWeekly = async () => {
+    setPrinting(true);
+    try { await printUrl('/api/dashboard/weekly.html'); }
+    catch (e) { showToast(e.message, 'error'); }
+    finally { setPrinting(false); }
+  };
+
+  const k = data && data.kpis;
 
   return (
     <>
       <div className="page-title">
         <h1>Dashboard</h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div style={{ display: 'inline-flex', border: '1px solid var(--line)', borderRadius: 8, overflow: 'hidden' }}>
+          <div className="view-toggle" role="group" aria-label="Range">
             {PRESETS.map((p) => (
-              <button
-                key={p.key}
-                onClick={() => setPreset(p.key)}
-                style={{
-                  padding: '6px 12px', border: 0, cursor: 'pointer', fontSize: 13,
-                  background: preset === p.key ? 'var(--brand)' : 'transparent',
-                  color: preset === p.key ? '#fff' : 'var(--ink-soft)',
-                }}
-              >{p.label}</button>
+              <button key={p.key} type="button" className={preset === p.key ? 'on' : ''} aria-pressed={preset === p.key}
+                onClick={() => setPreset(p.key)}>{p.label}</button>
             ))}
           </div>
-          <button className="btn" onClick={() => window.open('/api/dashboard/weekly.html', '_blank', 'noopener')}>
-            🖨️ Weekly report
-          </button>
+          {admin && (
+            <>
+              <a className="btn secondary" href="/api/dashboard/weekly.html" target="_blank" rel="noreferrer noopener">Weekly report</a>
+              <button type="button" className="btn" disabled={printing} onClick={printWeekly}>🖨️ {printing ? 'Preparing…' : 'Print'}</button>
+            </>
+          )}
         </div>
       </div>
 
-      {loading && !data && <div className="card" style={{ padding: 24 }}>Loading…</div>}
+      {error && !data && <ErrorState error={error} onRetry={reload} />}
+      {error && data && <ErrorState error={error} onRetry={reload} compact />}
+      {loading && !data && <LoadingState />}
 
       {k && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 14 }}>
-            <StatCard label="Total leads" value={k.totalLeads} color="var(--blue)" onClick={() => navigate('/leads')} />
-            <StatCard label="Pipeline value" value={rupees(k.pipelineValuePaise)} color="var(--brand)" onClick={() => navigate('/leads')} />
-            <StatCard label={`Revenue (${data.range.from.slice(5)}–${data.range.to.slice(5)})`} value={rupees(k.revenuePaise)} color="var(--green)" onClick={() => navigate('/collections')} />
-            <StatCard label="Active projects" value={k.activeProjects} color="var(--amber)" onClick={() => navigate('/projects')} />
+            <StatCard label="Total leads" value={k.totalLeads} color="var(--blue-text)" onClick={() => navigate('/leads')} />
+            <StatCard label="Pipeline (unpaid deal value)" value={rupees(k.pipelineValuePaise)} color="var(--brand)" onClick={() => navigate('/collections')} />
+            <StatCard label={`Revenue (${data.range.from.slice(5)}–${data.range.to.slice(5)})`} value={rupees(k.revenuePaise)} color="var(--green-text)" onClick={() => navigate('/collections')} />
+            <StatCard label="Active projects" value={k.activeProjects} color="var(--amber-text)" onClick={() => navigate('/projects')} />
             <StatCard label="Calls" value={k.callsInRange} sub={`${k.connectsInRange} connected`} color="var(--ink)" onClick={() => navigate('/leads')} />
           </div>
 
@@ -194,10 +189,10 @@ export default function Dashboard() {
               <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{data.scope === 'team' ? 'Company-wide' : 'Your activity'}</span>
             </div>
             <TrendChart trend={data.trend} />
-            <Legend />
+            <ChartLegend />
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: admin ? '1fr 1fr' : '1fr', gap: 14, marginTop: 14, alignItems: 'start' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: admin ? 'repeat(auto-fit, minmax(280px, 1fr))' : '1fr', gap: 14, marginTop: 14, alignItems: 'start' }}>
             {admin && (
               <div className="card">
                 <h3 style={{ marginTop: 0 }}>Top performers</h3>
@@ -207,7 +202,7 @@ export default function Dashboard() {
                   <div className="row-list">
                     {data.topPerformers.map((p, i) => (
                       <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
-                        <span style={{ width: 22, textAlign: 'center', fontWeight: 800, color: i === 0 ? 'var(--amber)' : 'var(--ink-faint)' }}>
+                        <span style={{ width: 22, textAlign: 'center', fontWeight: 800, color: i === 0 ? 'var(--amber-text)' : 'var(--ink-faint)' }}>
                           {i === 0 ? '🏆' : i + 1}
                         </span>
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -216,7 +211,7 @@ export default function Dashboard() {
                             {p.calls} calls · {p.connects} connects · {p.deals} deals · {p.leads} leads
                           </div>
                         </div>
-                        <div style={{ fontWeight: 700, color: 'var(--green)', whiteSpace: 'nowrap' }}>{rupees(p.revenuePaise)}</div>
+                        <div style={{ fontWeight: 700, color: 'var(--green-text)', whiteSpace: 'nowrap' }}>{rupees(p.revenuePaise)}</div>
                       </div>
                     ))}
                   </div>
@@ -233,8 +228,9 @@ export default function Dashboard() {
                   {data.upcomingFollowups.map((f) => (
                     <button
                       key={f.id}
-                      className="lead-row"
-                      style={{ width: '100%', textAlign: 'left' }}
+                      type="button"
+                      className="lead-row clickable"
+                      style={{ width: '100%' }}
                       onClick={() => navigate(`/leads/${f.lead_id}`)}
                     >
                       <div className="info">
@@ -268,19 +264,20 @@ export default function Dashboard() {
                 {data.intelligence.recent.map((r) => (
                   <button
                     key={r.id}
-                    className="lead-row"
-                    style={{ width: '100%', textAlign: 'left' }}
+                    type="button"
+                    className="lead-row clickable"
+                    style={{ width: '100%' }}
                     onClick={() => r.lead_id && navigate(`/leads/${r.lead_id}`)}
                   >
                     <div className="info">
                       <div className="name" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                         {r.lead_name || 'Unmatched call'}
-                        {r.intent && <span style={{ fontSize: 11, fontWeight: 700, padding: '1px 8px', borderRadius: 999, background: 'var(--brand-soft)', color: 'var(--brand)' }}>{r.intent}</span>}
+                        {r.intent && <span className="badge follow_up">{r.intent}</span>}
                         {r.sentiment && <span style={{ fontSize: 11, color: SENTIMENT_COLOR[String(r.sentiment).toLowerCase()] || 'var(--ink-soft)' }}>● {r.sentiment}</span>}
                         {r.overall != null && <span style={{ fontSize: 11, color: 'var(--ink-soft)' }}>{r.overall}/10</span>}
                       </div>
                       {r.summary && <div className="meta" style={{ whiteSpace: 'normal' }}>{r.summary}</div>}
-                      {r.coaching && <div className="meta" style={{ color: 'var(--amber)', whiteSpace: 'normal' }}>💡 {r.coaching}</div>}
+                      {r.coaching && <div className="meta" style={{ color: 'var(--amber-text)', whiteSpace: 'normal' }}>💡 {r.coaching}</div>}
                     </div>
                   </button>
                 ))}

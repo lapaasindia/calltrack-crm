@@ -1,0 +1,26 @@
+{
+  "electron": "44.2.0",
+  "abi": "149",
+  "betterSqlite3": "13.0.3",
+  "fetchedAt": "2026-09-05T15:16:23.988Z",
+  "files": {
+    "darwin-arm64/better_sqlite3.node": {
+      "sha256": "98e0e8acd01c632fe5615243e1296af0372826f8783b18fc31c506f73c47459c",
+      "size": 1980736,
+      "abi": "149",
+      "kind": "macho64"
+    },
+    "darwin-x64/better_sqlite3.node": {
+      "sha256": "e6db154afe9d250e242e2ea3d45d273718ab80a0751d08873637553031752d21",
+      "size": 1982880,
+      "abi": "149",
+      "kind": "macho64"
+    },
+    "win32-x64/better_sqlite3.node": {
+      "sha256": "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a",
+      "size": 1989632,
+      "abi": "149",
+      "kind": "pe"
+    }
+  }
+}

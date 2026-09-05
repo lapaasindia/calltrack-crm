@@ -1,14 +1,13 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
-    
+
     repositories {
         google()
         mavenCentral()
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.2.1'
-        classpath 'com.google.gms:google-services:4.4.0'
         classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22'
 
         // NOTE: Do not place your application dependencies here; they belong
@@ -22,19 +21,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // @capacitor/barcode-scanner's native lib (com.github.outsystems:osbarcode-android)
-        // is on JitPack, which now requires an auth token. Create a free token at
-        // https://jitpack.io (sign in with GitHub → Authorize), then put it in your
-        // ~/.gradle/gradle.properties as:  jitpackToken=jp_xxxxxxxx
-        // (or export JITPACK_TOKEN). Without it the build fails to resolve the QR
-        // scanner's AAR (HTTP 401 from JitPack).
-        maven {
-            url 'https://jitpack.io'
-            def jpToken = project.findProperty('jitpackToken') ?: System.getenv('JITPACK_TOKEN')
-            if (jpToken) {
-                credentials { username = jpToken }
-            }
-        }
+        // No JitPack / google-services: the QR scanner is Google ML Kit from
+        // Google's Maven and there is no push messaging (MOB-19/MOB-25).
     }
 }
 

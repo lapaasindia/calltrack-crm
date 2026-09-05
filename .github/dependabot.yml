@@ -1,0 +1,73 @@
+# Dependabot version updates. Security alerts + security updates are a
+# repository SETTING (Settings → Code security → Dependabot) and must be
+# switched on separately — this file only schedules version PRs.
+version: 2
+updates:
+  # Root: server runtime + desktop shell + Android toolchain (npm side).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    groups:
+      # One PR per week for all minor/patch bumps; majors arrive individually.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # Capacitor 7/8 is a coordinated toolchain migration (AGP/Gradle/JDK 21,
+      # regenerated cap-sync files, Kotlin plugin API review) — tracked in
+      # CHANGELOG.md "Known follow-ups", not something to merge from a bot PR.
+      - dependency-name: "@capacitor/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@capacitor-mlkit/*"
+        update-types: ["version-update:semver-major"]
+      # baileys 7.x is release-candidate only and rewrites the auth/signal
+      # internals; stay on the `legacy` 6.7 line until 7.0.0 is GA.
+      - dependency-name: baileys
+        update-types: ["version-update:semver-major"]
+
+  # Web client bundle.
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Workflow actions (keeps the major tags — and, once SHA-pinned, the SHAs — current).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Android: AGP, Kotlin, AndroidX, WorkManager (mobile/android/*.gradle).
+  - package-ecosystem: gradle
+    directory: /mobile/android
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # AGP/Kotlin majors are part of the Capacitor 8 migration (needs JDK 21).
+      - dependency-name: "com.android.tools.build:gradle"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.jetbrains.kotlin:kotlin-gradle-plugin"
+        update-types: ["version-update:semver-major"]

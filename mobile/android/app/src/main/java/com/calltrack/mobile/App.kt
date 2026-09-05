@@ -9,6 +9,11 @@ import android.app.Application
  * WebView never loads. Only re-arms when already paired — never schedules work
  * for an unpaired install.
  *
+ * The foreground service is only (re)started from here when the app is exempt
+ * from battery optimisation; otherwise a background start would throw on
+ * API 31+ and crash-loop every WorkManager wake (MOB-7). MainActivity starts
+ * it from the foreground on the next app open.
+ *
  * NOTE: We deliberately do NOT implement Configuration.Provider here. Capacitor
  * pulls in androidx.startup, which merges WorkManagerInitializer to initialize
  * WorkManager on-demand. Adding a custom Configuration.Provider here would
@@ -17,13 +22,8 @@ import android.app.Application
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        // Re-arm only if the phone is already paired (config present).
-        if (SyncEngine.config(this) != null) {
-            CallSyncPlugin.schedulePeriodic(this)
-            // If the user already opted into the always-on service, restart it.
-            if (CallObserverService.isEnabled(this)) {
-                CallObserverService.start(this)
-            }
-        }
+        if (SyncEngine.config(this) == null) return
+        try { CallSyncPlugin.schedulePeriodic(this) } catch (_: Throwable) {}
+        try { CallObserverService.startIfAllowedInBackground(this) } catch (_: Throwable) {}
     }
 }

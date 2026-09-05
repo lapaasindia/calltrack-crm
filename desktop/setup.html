@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>CallTrack Setup</title>
 <style>
   * { box-sizing: border-box; margin: 0; }
@@ -15,7 +16,11 @@
   .err {
     background: rgba(224, 36, 36, 0.15); border: 1px solid rgba(224, 36, 36, 0.4);
     color: #ffb4b4; border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin-bottom: 16px;
-    display: none;
+    display: none; white-space: pre-wrap; -webkit-user-select: text;
+  }
+  .info {
+    background: rgba(129,140,248,0.12); border: 1px solid rgba(129,140,248,0.35);
+    color: #c7ccf5; border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none;
   }
   .choice {
     display: block; width: 100%; text-align: left; background: rgba(255,255,255,0.05);
@@ -43,6 +48,7 @@
     background: none; border: 1px solid rgba(255,255,255,0.2); color: #a7adc4;
     font-size: 12.5px; padding: 8px 12px; border-radius: 8px; cursor: pointer; margin-top: 14px; font-family: inherit;
   }
+  .ghost:disabled { opacity: 0.4; cursor: default; }
   .note { font-size: 12px; color: #8f95ab; margin-top: 14px; line-height: 1.55; }
   .ok { color: #6ee7b7; font-size: 13px; margin-top: 8px; display: none; }
 </style>
@@ -51,6 +57,8 @@
   <div class="logo">Call<span>Track</span> CRM</div>
   <div class="tag">One-time setup — how should this computer be used?</div>
   <div class="err" id="err"></div>
+  <div class="info" id="attachedInfo">This computer runs the CallTrack background service. Choose "main computer" to open it — the app will attach to the service; restoring a backup here is done in the service's data folder, not from this screen.</div>
+  <div class="info" id="previousInfo"></div>
 
   <button class="choice" id="pickHost">
     <div class="t">🖥️ This is the MAIN computer (host)</div>
@@ -77,57 +85,12 @@
 
   <div class="panel" id="joinPanel">
     <label>Main computer's address</label>
-    <input type="text" id="serverUrl" placeholder="e.g.  192.168.1.50:3000  or  lapaas-2.local:3000" />
+    <input type="text" id="serverUrl" placeholder="e.g.  192.168.1.50:3000  or  lapaas-2.local:3000" maxlength="200" />
     <div class="note">Find it on the main computer: open CallTrack there → menu
     <b>Server → Connection Info</b>. Both computers must be on the same office network.</div>
     <button class="btn" id="goJoin">Connect</button>
   </div>
 
-<script>
-  const $ = (id) => document.getElementById(id);
-  const params = new URLSearchParams(location.search);
-  if (params.get('error')) { $('err').textContent = params.get('error'); $('err').style.display = 'block'; }
-
-  let mode = null;
-  function pick(m) {
-    mode = m;
-    $('pickHost').classList.toggle('on', m === 'host');
-    $('pickJoin').classList.toggle('on', m === 'join');
-    $('hostPanel').style.display = m === 'host' ? 'block' : 'none';
-    $('joinPanel').style.display = m === 'join' ? 'block' : 'none';
-    if (m === 'join') $('serverUrl').focus();
-  }
-  $('pickHost').onclick = () => pick('host');
-  $('pickJoin').onclick = () => pick('join');
-
-  function fail(msg) { $('err').textContent = msg; $('err').style.display = 'block'; }
-
-  $('goHost').onclick = async () => {
-    $('goHost').disabled = true;
-    const res = await window.calltrack.choose({ mode: 'host', openAtLogin: $('openAtLogin').checked });
-    if (!res.ok) { fail(res.error); $('goHost').disabled = false; }
-  };
-
-  $('goJoin').onclick = async () => {
-    if (!$('serverUrl').value.trim()) return fail('Enter the main computer\'s address first.');
-    $('goJoin').disabled = true;
-    $('goJoin').textContent = 'Checking…';
-    const res = await window.calltrack.choose({ mode: 'join', serverUrl: $('serverUrl').value });
-    if (!res.ok) {
-      fail(res.error);
-      $('goJoin').disabled = false;
-      $('goJoin').textContent = 'Connect';
-    }
-  };
-  $('serverUrl') && ($('serverUrl').onkeydown = (e) => { if (e.key === 'Enter') $('goJoin').click(); });
-
-  $('restoreBtn').onclick = async () => {
-    const res = await window.calltrack.restore();
-    if (res.ok) {
-      $('restoreOk').textContent = `✓ Restored from ${res.file} — your data will be there when the app starts.`;
-      $('restoreOk').style.display = 'block';
-    } else if (res.error) fail(res.error);
-  };
-</script>
+<script src="setup.js"></script>
 </body>
 </html>

@@ -3,8 +3,7 @@
   "appName": "CallTrack",
   "webDir": "mobile/www",
   "android": {
-    "path": "mobile/android",
-    "allowMixedContent": true
+    "path": "mobile/android"
   },
   "server": {
     "cleartext": true,

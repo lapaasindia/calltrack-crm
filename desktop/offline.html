@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+<title>CallTrack CRM</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1f36; color: #e7e9f4; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    -webkit-user-select: none;
+  }
+  .card { max-width: 520px; padding: 36px; text-align: center; }
+  .logo { font-size: 26px; font-weight: 800; color: #fff; margin-bottom: 18px; }
+  .logo span { color: #818cf8; }
+  h1 { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 10px; }
+  p { color: #a7adc4; font-size: 14px; line-height: 1.6; }
+  .url { font-family: ui-monospace, Menlo, monospace; color: #c7ccf5; -webkit-user-select: text; }
+  .spin {
+    width: 28px; height: 28px; border: 3px solid rgba(255,255,255,0.15); border-top-color: #818cf8; border-radius: 50%;
+    margin: 22px auto 10px; animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .small { font-size: 12px; color: #8f95ab; margin-top: 8px; }
+  .actions { margin-top: 22px; display: flex; gap: 12px; justify-content: center; }
+  a.btn {
+    display: inline-block; text-decoration: none; background: #4f46e5; color: #fff; font-weight: 700; font-size: 14px;
+    padding: 11px 18px; border-radius: 10px;
+  }
+  a.ghost { background: none; border: 1px solid rgba(255,255,255,0.25); color: #a7adc4; font-weight: 600; }
+  .reason { font-size: 12px; color: #8f95ab; margin-top: 14px; -webkit-user-select: text; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Call<span>Track</span> CRM</div>
+    <h1 id="title">Can't reach the main computer</h1>
+    <p id="text">Trying again every 5 seconds. Make sure the main computer is on and both computers are on the same office WiFi.</p>
+    <div class="spin"></div>
+    <div class="small">Address: <span class="url" id="url"></span></div>
+    <div class="reason" id="reason"></div>
+    <div class="actions">
+      <a class="btn" href="calltrack://retry">Retry now</a>
+      <a class="btn ghost" href="calltrack://change-setup">Change setup…</a>
+    </div>
+    <div class="small" id="version"></div>
+  </div>
+<script src="offline.js"></script>
+</body>
+</html>

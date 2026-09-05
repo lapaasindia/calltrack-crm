@@ -57,7 +57,7 @@ Review queue · admin/caller roles.
 
 ## Phase 1B — Off-site encrypted Google Drive backup  *(ops; independent, can ship early)*
 Outbound-only (Mac → Drive), so it does **not** expose the LAN app to the internet. Layers on top of the
-existing `server/lib/backup.js` (which already produces a consistent daily `VACUUM INTO` snapshot) — the
+existing `server/lib/backup.js` (which already produces a consistent, verified daily snapshot via SQLite's online backup API) — the
 local backup is untouched; this just uploads.
 
 Decided with Sahil (2026-06-16): **back up everything under `data/`**, **AES-encrypted with a passphrase**,
@@ -69,7 +69,7 @@ connected via an **in-app "Connect Google Drive" OAuth button**.
   Refresh token stored encrypted under `data/secret.key`. One-time Google Cloud setup (create a Desktop
   OAuth client + enable Drive API) → documented click-by-click in `docs/GOOGLE-DRIVE-BACKUP.md`.
 - **`server/lib/cloudBackup.js`** — builds the upload set from `data/`:
-  - **Include:** the latest **VACUUM snapshot** (`backups/crm-<date>.sqlite`, NOT the live `crm.sqlite`
+  - **Include:** the latest **verified backup snapshot** (`backups/crm-<date>.sqlite`, NOT the live `crm.sqlite`
     + `-wal`/`-shm`), `data/recordings/**`, future `data/invoices/**` and exports.
   - **Exclude:** `sessions.sqlite*`, `*-wal`/`*-shm`, `*.log`, `data/apk/` (build artifact, not data).
   - Each file is **AES-256-GCM** encrypted locally (key = scrypt(passphrase, per-install salt)) before

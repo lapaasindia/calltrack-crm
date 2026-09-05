@@ -14,6 +14,14 @@
 // right-click -> Open (or `xattr -cr <app>`) clears. It does NOT remove the
 // prompt entirely — only Apple notarization (paid) does that.
 //
+// Ordering with electron-builder 26 (app-builder-lib platformPackager.doPack):
+//   afterPack (this hook) → electronFuses flip → code signing.
+// Flipping fuses rewrites the Electron binary and would invalidate this
+// signature, which is why package.json sets `resetAdHocDarwinSignature: true`
+// — @electron/fuses then re-applies a deep ad-hoc signature to the whole .app
+// right after the flip. This hook stays so a build with fuses disabled
+// (`-c.electronFuses=null`) is still signed, and it costs nothing otherwise.
+//
 // Runs once per macOS arch (arm64, x64); skipped for the Windows build.
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');

@@ -2,13 +2,15 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
+import { isAdmin } from '../lib/permissions.js';
 
 const CATEGORIES = ['intro', 'follow_up', 'payment_reminder', 'support', 'custom'];
 const router = Router();
 
 // Callers need templates for WhatsApp buttons.
 router.get('/', (req, res) => {
-  const includeInactive = req.query.all === '1' && req.user.role === 'admin';
+  // `?all=1` (include inactive) for the admin tier, not just literal 'admin' (CLIENT-8).
+  const includeInactive = req.query.all === '1' && isAdmin(req.user.role);
   const rows = db.prepare(
     `SELECT * FROM message_templates ${includeInactive ? '' : 'WHERE is_active = 1'}
      ORDER BY sort_order, name`

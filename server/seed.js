@@ -15,18 +15,28 @@ function utcAt(istDate, istHour, istMin = 0) {
 }
 
 // ---------- Users ----------
-const haveAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin'").get();
-if (!haveAdmin) {
-  const mk = (username, name, role, pw) => db.prepare(
-    'INSERT INTO users (username, password_hash, full_name, role, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(username, bcrypt.hashSync(pw, 10), name, role, now).lastInsertRowid;
-  mk('admin', 'Sahil Khanna', 'admin', 'admin123');
+// Same first-run rule as bootstrap.js (audit SEC-1): if CRM_ADMIN_PASSWORD is
+// set, use it and don't force a change; otherwise fall back to the well-known
+// 'admin123' but flag must_change_password so the account is locked to the
+// change-password endpoint until the operator picks a real password. Demo
+// callers keep their simple shared password (they are demo data) but are
+// called out loudly below.
+if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
+  const envPw = process.env.CRM_ADMIN_PASSWORD && String(process.env.CRM_ADMIN_PASSWORD);
+  const adminPw = envPw || 'admin123';
+  const adminMustChange = envPw ? 0 : 1;
+  const mk = (username, name, role, pw, mustChange = 0) => db.prepare(
+    'INSERT INTO users (username, password_hash, full_name, role, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(username, bcrypt.hashSync(pw, 10), name, role, mustChange, now).lastInsertRowid;
+  mk('admin', 'Sahil Khanna', 'admin', adminPw, adminMustChange);
   mk('priya', 'Priya Sharma', 'caller', 'caller123');
   mk('rahul', 'Rahul Verma', 'caller', 'caller123');
   console.log('Users created:');
-  console.log('  admin / admin123   (admin — CHANGE THIS PASSWORD after first login)');
-  console.log('  priya / caller123  (caller)');
-  console.log('  rahul / caller123  (caller)');
+  console.log(envPw
+    ? '  admin              (admin — password taken from CRM_ADMIN_PASSWORD)'
+    : '  admin / admin123   (admin — you MUST set a new password on first login; the account is locked until you do)');
+  console.log('  priya / caller123  (caller — DEMO account, change or remove before real use)');
+  console.log('  rahul / caller123  (caller — DEMO account, change or remove before real use)');
 } else {
   console.log('Users already exist — skipping.');
 }

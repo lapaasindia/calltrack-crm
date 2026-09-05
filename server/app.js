@@ -1,6 +1,12 @@
 // Embeddable server core: used by the CLI (server/index.js) and by the
 // desktop app (desktop/main.js). IMPORTANT: import this module only AFTER
 // setting CRM_DATA_DIR / CRM_BACKUP_DIR env vars — db.js reads them at load.
+//
+// asyncRoutes MUST be the first import: it patches express's Router layers so
+// a rejected async handler becomes a 500 JSON response instead of a hung
+// request + unhandledRejection (audit SEC-8 / SCALE-8). Route modules build
+// their Routers at import time, after this line.
+import './lib/asyncRoutes.js';
 import express from 'express';
 import session from 'express-session';
 import crypto from 'node:crypto';
@@ -11,12 +17,18 @@ import { fileURLToPath } from 'node:url';
 
 import https from 'node:https';
 
-import { DATA_DIR } from './db.js';
-import { SqliteSessionStore } from './lib/sessionStore.js';
-import { requireAuth, requirePasswordChanged } from './middleware/auth.js';
+import dbDefault, { DATA_DIR, getSetting, shutdownDb, APP_VERSION } from './db.js';
+import { SqliteSessionStore, closeSessionStore } from './lib/sessionStore.js';
+import {
+  requireAuth, requirePasswordChanged, requireOwner, requireWriter,
+} from './middleware/auth.js';
 import { startBackupScheduler } from './lib/backup.js';
 import { startCloudBackupScheduler } from './lib/cloudBackup.js';
 import { ensureBootstrapped } from './bootstrap.js';
+import { log, requestLogger } from './lib/logger.js';
+import { opsHealth, installProcessGuards } from './lib/ops.js';
+import { drainJobs } from './lib/jobs.js';
+import { startMaintenanceJob } from './lib/maintenance.js';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -50,17 +62,12 @@ import dashboardRoutes from './routes/dashboard.js';
 import whatsappRoutes from './routes/whatsapp.js';
 import { startAiWorker } from './lib/ai.js';
 import { startRetentionJob } from './lib/recordingsRetention.js';
-import { startWhatsApp } from './lib/whatsapp.js';
-import dbDefault, { getSetting } from './db.js';
+import { startWhatsApp, stopWhatsApp } from './lib/whatsapp.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Single source of truth: the root package.json version (so /api/health and the
-// in-app version label never drift from the real release). Read once at load.
-export const APP_VERSION = (() => {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version;
-  } catch { return '0.0.0'; }
-})();
+// Single source of truth: the root package.json version (read once by db.js so
+// /api/health, the in-app label and schema_migrations.app_version never drift).
+export { APP_VERSION };
 
 export function lanAddresses() {
   const addrs = [];
@@ -113,6 +120,10 @@ export function createApp() {
     next();
   });
 
+  // Request log (method, path, status, ms, user id, request id) — before the
+  // body parser so a 413/400 from it is recorded too (audit SCALE-17).
+  app.use(requestLogger(log));
+
   // CORS for the mobile app: its WebView origin (http(s)://localhost) is
   // cross-origin to the LAN server. Bearer-token requests carry no cookies,
   // so reflecting the origin WITHOUT allow-credentials is safe — it can't be
@@ -129,7 +140,11 @@ export function createApp() {
     next();
   });
 
-  app.use(express.json({ limit: '10mb' })); // big lead imports arrive as JSON
+  // 1 MB is plenty for every normal API call; a 10 MB body was parsed
+  // synchronously for ANY endpoint (audit SCALE-24). Routes that legitimately
+  // take more (lead imports, mobile sync batches) mount their own express.json
+  // with a larger limit.
+  app.use(express.json({ limit: '1mb' }));
 
   app.use(session({
     store: new SqliteSessionStore(),
@@ -180,6 +195,17 @@ export function createApp() {
   // A still-default admin (must_change_password) is locked to the
   // change-password endpoint until it picks a real password (audit H-1).
   app.use('/api', requirePasswordChanged);
+  // read_only accounts can never write: 403 on any non-GET/HEAD/OPTIONS under
+  // /api (change-password/logout live under /api/auth, mounted above, so a
+  // read_only user can still rotate their own password).
+  app.use('/api', requireWriter);
+
+  // Owner-only operability snapshot (audit SCALE-17): DB integrity + WAL size,
+  // backup ages, AI queue, event-loop lag, free disk. Authenticated, unlike
+  // /api/health, because it names file sizes and paths.
+  app.get('/api/ops/health', requireOwner, (req, res) => {
+    res.json(opsHealth({ version: APP_VERSION }));
+  });
 
   app.use('/api/users', userRoutes);
   app.use('/api/products', productRoutes);
@@ -216,21 +242,58 @@ export function createApp() {
 
   // eslint-disable-next-line no-unused-vars
   app.use('/api', (err, req, res, next) => {
-    console.error(err);
+    // Body-parser problems are the client's fault, not a server error: say so
+    // with the right status instead of an opaque 500.
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'Request body too large' });
+    }
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'Malformed JSON body' });
+    }
     // A foreign-key violation means the row is still referenced elsewhere —
     // surface that as a clear 409 instead of an opaque 500 so a missed detach
     // (e.g. a new table referencing projects) degrades gracefully.
     if (err && err.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
       return res.status(409).json({ error: 'Still referenced by other records — remove or detach those first.' });
     }
-    res.status(500).json({ error: 'Server error' });
+    log.error({
+      err, req_id: req.id, method: req.method, path: (req.originalUrl || '').split('?')[0], user_id: req.user?.id ?? null,
+    }, 'request failed');
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: 'Server error', request_id: req.id });
   });
 
-  // Serve the built client; SPA catch-all for client-side routing.
-  const distDir = path.join(__dirname, '..', 'client', 'dist');
+  // Serve the built client (audit CLIENT-12):
+  //   * /assets/* are content-hashed by Vite → immutable, cached for a year,
+  //     and an UNKNOWN asset is a 404 (never index.html, which used to turn a
+  //     stale tab after an upgrade into "Unexpected token '<'" + a white page).
+  //   * index.html is never cached (no-store) so every load picks up the new
+  //     asset hashes right after a rebuild.
+  //   * favicon / source maps 404 instead of returning the SPA shell.
+  //   * SPA catch-all only for non-asset, non-API paths.
+  // CRM_CLIENT_DIST lets a test instance serve a scratch build without
+  // touching client/dist (which the live office server serves straight from disk).
+  const distDir = process.env.CRM_CLIENT_DIST || path.join(__dirname, '..', 'client', 'dist');
   if (fs.existsSync(distDir)) {
-    app.use(express.static(distDir));
-    app.get('*', (req, res) => res.sendFile(path.join(distDir, 'index.html')));
+    const indexHtml = path.join(distDir, 'index.html');
+    app.use('/assets', express.static(path.join(distDir, 'assets'), {
+      immutable: true, maxAge: '1y', fallthrough: false, index: false,
+    }));
+    // fallthrough:false hands a 404 error to the error pipeline; keep it terse.
+    // eslint-disable-next-line no-unused-vars
+    app.use('/assets', (err, req, res, next) => {
+      res.status(err.status || 404).type('text/plain').send('Not found');
+    });
+    app.get(['/favicon.ico', '*.map'], (req, res) => res.status(404).type('text/plain').send('Not found'));
+    // Other root-level build files (manifest, icons) — plain static, revalidated.
+    app.use(express.static(distDir, { index: false, maxAge: 0 }));
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/assets/') || req.path.startsWith('/api/')) {
+        return res.status(404).type('text/plain').send('Not found');
+      }
+      res.set('Cache-Control', 'no-store');
+      res.sendFile(indexHtml);
+    });
   } else {
     app.get('/', (req, res) => res
       .status(503)
@@ -241,8 +304,13 @@ export function createApp() {
 }
 
 // Starts everything: bootstrap (first-run admin/templates), HTTP server,
-// daily backup scheduler. Resolves with the bound port and reachable URLs.
-export function startServer({ port = 3000 } = {}) {
+// schedulers. Resolves with { server, port, urls, stop } — stop() is the
+// graceful shutdown (stop accepting, drain jobs, checkpoint + close the DB)
+// that index.js runs on SIGTERM/SIGINT and the desktop app runs on quit.
+// processGuards installs the process-level unhandledRejection /
+// uncaughtException policy (default on; off under `node --test` so a test
+// failure is never swallowed).
+export function startServer({ port = 3000, processGuards = !process.env.NODE_TEST_CONTEXT } = {}) {
   ensureBootstrapped();
   const app = createApp();
   const tls = tlsConfig();
@@ -250,18 +318,52 @@ export function startServer({ port = 3000 } = {}) {
   return new Promise((resolve, reject) => {
     const httpServer = tls ? https.createServer(tls, app) : app;
     const server = httpServer.listen(port, '0.0.0.0', () => {
+      let stopping = null;
+      const stop = ({ timeoutMs = 10000 } = {}) => {
+        if (stopping) return stopping;
+        stopping = (async () => {
+          const t0 = Date.now();
+          log.info('shutdown: stop accepting connections');
+          const closed = new Promise((res) => server.close(() => res()));
+          try { server.closeIdleConnections?.(); } catch { /* older Node */ }
+          // Let a running backup / cloud upload / AI job finish (bounded).
+          const drained = await drainJobs(Math.max(1000, timeoutMs - 2000));
+          if (!drained) log.warn('shutdown: background jobs still running after grace period');
+          await Promise.race([closed, new Promise((res) => setTimeout(res, 1500).unref())]);
+          try { server.closeAllConnections?.(); } catch { /* older Node */ }
+          try { await stopWhatsApp(); } catch (err) { log.warn({ err }, 'shutdown: whatsapp stop failed'); }
+          shutdownDb();
+          // sessions.sqlite is a separate connection: checkpoint + close it too.
+          try { closeSessionStore(); } catch (err) { log.warn({ err }, 'shutdown: session store close failed'); }
+          log.info({ ms: Date.now() - t0 }, 'shutdown: complete');
+        })();
+        return stopping;
+      };
+
+      if (processGuards) {
+        installProcessGuards({
+          onFatal: (err) => {
+            log.fatal({ err }, 'fatal error — exiting after graceful stop');
+            setTimeout(() => process.exit(1), 5000).unref();
+            stop({ timeoutMs: 4000 }).finally(() => process.exit(1));
+          },
+        });
+      }
+
       startBackupScheduler();
       startCloudBackupScheduler();
       startAiWorker();
       startRetentionJob();
+      startMaintenanceJob();
       // WhatsApp: default-OFF and lazy. startWhatsApp() returns immediately when
       // whatsapp_enabled is false, and degrades (never throws) if baileys is not
       // installed — so default boot stays clean and offline-safe.
       if (getSetting('whatsapp_enabled', false) === true) {
         startWhatsApp(dbDefault, { getSetting, dataDir: DATA_DIR })
-          .catch((e) => console.error('[whatsapp] boot start failed:', e && e.message));
+          .catch((e) => log.error({ err: e }, '[whatsapp] boot start failed'));
       }
       const hostname = os.hostname().replace(/\.local$/, '');
+      log.info({ port, version: APP_VERSION }, 'server listening');
       resolve({
         server,
         port,
@@ -270,6 +372,7 @@ export function startServer({ port = 3000 } = {}) {
           lan: lanAddresses().map((ip) => `${scheme}://${ip}:${port}`),
           mdns: `${scheme}://${hostname}.local:${port}`,
         },
+        stop,
       });
     });
     server.on('error', reject);

@@ -1,15 +1,26 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 
+// Single source of truth for the app version (MOB-14/EMU-10): the root
+// package.json `version` (shared with the server, web and desktop builds).
+//   versionName = "1.2.2"
+//   versionCode = major*10000 + minor*100 + patch  → 10202 (monotonic; the
+//                 in-app updater compares versionCode, so never hand-edit it).
+def rootPkg = new groovy.json.JsonSlurper().parse(file('../../../package.json'))
+def appVersionName = (rootPkg.version as String).split('-')[0]
+def semver = appVersionName.tokenize('.').collect { it.toInteger() }
+if (semver.size() != 3) throw new GradleException("package.json version must be MAJOR.MINOR.PATCH, got '${rootPkg.version}'")
+def appVersionCode = semver[0] * 10000 + semver[1] * 100 + semver[2]
+
 android {
     namespace "com.calltrack.mobile"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "com.calltrack.mobile"
-        minSdkVersion 26
+        minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "1.2.1"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -46,6 +57,20 @@ android {
     }
 }
 
+// Fail FAST on a release build without the signing keystore (MOB-25): an
+// unsigned release APK cannot be installed on any phone and a debug-signed one
+// breaks the auto-updater, so refuse to produce either.
+gradle.taskGraph.whenReady { graph ->
+    def releaseRequested = graph.allTasks.any { t ->
+        t.project == project && (t.name ==~ /(assemble|bundle|package|install)Release/)
+    }
+    if (releaseRequested && !System.getenv("CALLTRACK_KEYSTORE")) {
+        throw new GradleException(
+            "Release build refused: CALLTRACK_KEYSTORE (and CALLTRACK_KEYSTORE_PASS) are not set. " +
+            "See docs/ANDROID-APK.md — an unsigned release APK is useless.")
+    }
+}
+
 repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
@@ -60,6 +85,8 @@ dependencies {
     implementation project(':capacitor-android')
     implementation "androidx.work:work-runtime-ktx:2.9.1"
     implementation "androidx.documentfile:documentfile:1.0.1"
+    // Keystore-backed EncryptedSharedPreferences for the device token (MOB-13).
+    implementation "androidx.security:security-crypto:1.1.0"
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
@@ -67,12 +94,3 @@ dependencies {
 }
 
 apply from: 'capacitor.build.gradle'
-
-try {
-    def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
-        apply plugin: 'com.google.gms.google-services'
-    }
-} catch(Exception e) {
-    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
-}

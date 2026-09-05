@@ -152,7 +152,10 @@ router.post('/contacts/:id/create-lead', requireAdmin, (req, res) => {
   const contact = db.prepare('SELECT * FROM wa_contacts WHERE id = ?').get(req.params.id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
   if (contact.lead_id) {
-    const lead = db.prepare('SELECT id, name FROM leads WHERE id = ?').get(contact.lead_id);
+    // deleted_at MUST be selected — without it the check below was always
+    // truthy and a chat linked to a soft-deleted lead could never be promoted
+    // again (SCALE-19).
+    const lead = db.prepare('SELECT id, name, deleted_at FROM leads WHERE id = ?').get(contact.lead_id);
     if (lead && !lead.deleted_at) return res.status(409).json({ error: 'Chat already linked to a lead', lead_id: contact.lead_id });
   }
 

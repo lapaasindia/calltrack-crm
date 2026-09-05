@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { loadLead } from '../middleware/auth.js';
+import { loadLead, requireWriter } from '../middleware/auth.js';
 import { nowUtc } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
@@ -16,6 +16,7 @@ export const OUTCOMES = {
 };
 
 const router = Router({ mergeParams: true });
+router.use(requireWriter);
 
 // Log a call on a lead. One transaction: insert call → close pending follow-up
 // → schedule next follow-up → apply automatic stage transitions.
@@ -53,11 +54,27 @@ router.post('/', loadLead, (req, res) => {
     ).run(lead.id, req.user.id, callType, disposition, outcome, req.body.notes || null, duration, now);
     const callId = callInfo.lastInsertRowid;
 
-    // This call fulfills any pending follow-up on the lead.
-    db.prepare(
-      `UPDATE follow_ups SET status = 'done', completed_by_call_id = ?, completed_at = ?
-       WHERE lead_id = ? AND status = 'pending'`
-    ).run(callId, now, lead.id);
+    // A pending follow-up is fulfilled only by a call that actually reached
+    // someone (connected) or proved the number dead (wrong_number). A
+    // not_picked / busy / switched_off attempt keeps it PENDING — marking it
+    // done used to drop the lead out of the Today queue silently (QA-5; the
+    // README promises overdue items never silently disappear). If the caller
+    // set a new next follow-up on such an attempt, that one supersedes the old
+    // (cancelled, not "done" — nobody was reached).
+    const pending = db.prepare(
+      "SELECT id FROM follow_ups WHERE lead_id = ? AND status = 'pending'"
+    ).get(lead.id);
+    const reached = disposition === 'connected' || disposition === 'wrong_number';
+    let followUpKept = false;
+    if (pending && reached) {
+      db.prepare(
+        `UPDATE follow_ups SET status = 'done', completed_by_call_id = ?, completed_at = ? WHERE id = ?`
+      ).run(callId, now, pending.id);
+    } else if (pending && nextFollowUp) {
+      db.prepare("UPDATE follow_ups SET status = 'cancelled' WHERE id = ?").run(pending.id);
+    } else if (pending) {
+      followUpKept = true;
+    }
 
     if (nextFollowUp) {
       db.prepare(
@@ -85,10 +102,12 @@ router.post('/', loadLead, (req, res) => {
     // Recompute the rule-based lead score now that engagement/stage changed.
     recalcLeadScore(db, lead.id);
 
-    return { callId, stage };
+    return { callId, stage, followUpKept };
   })();
 
-  res.json({ ok: true, call_id: result.callId, stage: result.stage });
+  // follow_up_kept: true when a pending follow-up survived this (unreached)
+  // call, so the client can hint "follow-up still due".
+  res.json({ ok: true, call_id: result.callId, stage: result.stage, follow_up_kept: result.followUpKept });
 });
 
 export default router;

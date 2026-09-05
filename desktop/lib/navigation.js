@@ -1,12 +1,14 @@
-// Navigation / external-link policy for the desktop shell, factored out of
-// main.js so it can be unit-tested without launching Electron (no electron
-// import here). It decides, for a click that would navigate the main window,
-// whether to let it happen IN-WINDOW or cancel it and hand the URL to the OS
-// browser instead.
+// Navigation / external-link / permission policy for the desktop shell,
+// factored out of main.js so it can be unit-tested without launching Electron
+// (no electron import here). It decides, for anything that would navigate a
+// frame, open a window, redirect, or ask for a web permission, whether to let
+// it happen IN-APP or cancel it (optionally handing a safe URL to the OS).
 //
-// Security (audit H-5): only http(s)/mailto/tel may ever reach the OS shell —
-// never file:, smb:/UNC, data:, javascript:, or custom protocols (ms-msdt: …)
-// that turn a link into native code execution.
+// Security (audit H-5 / DESK-2 / DESK-3 / DESK-6 / DESK-17): only
+// http(s)/mailto/tel may ever reach the OS shell — never file:, smb:/UNC,
+// data:, javascript:, or custom protocols (ms-msdt: …) that turn a link into
+// native code execution. Subframes, redirects and popups follow the SAME
+// allow-list as top-level navigation, and web permissions are deny-by-default.
 
 export const SAFE_EXTERNAL_SCHEME = /^(https?|mailto|tel):/i;
 
@@ -49,4 +51,46 @@ export function isInAppUrl(target, windowUrl, config) {
 export function decideNavigation({ target, windowUrl, config } = {}) {
   if (isInAppUrl(target, windowUrl, config)) return { cancel: false, openExternal: false };
   return { cancel: true, openExternal: isSafeExternalScheme(target) };
+}
+
+// Server-side redirects (DESK-17): a compromised / MITM'd host must not be
+// able to 302 the trusted window to a phishing page. Off-app redirects are
+// cancelled and — unlike a user's click — NEVER handed to the OS browser: a
+// redirect is not a user action, so nothing legitimately leaves the app here.
+export function decideRedirect({ target, windowUrl, config } = {}) {
+  if (isInAppUrl(target, windowUrl, config)) return { cancel: false, openExternal: false };
+  return { cancel: true, openExternal: false };
+}
+
+// Subframe navigation (DESK-2). `will-navigate` is main-frame only, so an
+// <iframe src="smb://…"> never reached the H-5 allow-list. Non-main frames may
+// ONLY load in-app URLs — and they never open anything externally (an iframe
+// is not a user click). Main-frame navigations are left to will-navigate.
+export function decideFrameNavigation({ target, windowUrl, config, isMainFrame } = {}) {
+  if (isMainFrame) return { cancel: false, openExternal: false };
+  if (isInAppUrl(target, windowUrl, config)) return { cancel: false, openExternal: false };
+  return { cancel: true, openExternal: false };
+}
+
+// window.open / target=_blank (DESK-6). Same-origin popups (the print-ready
+// invoice, the weekly report) must open in a child window that shares the
+// session cookie; everything else is denied and — if safe — handed to the OS.
+export function decideWindowOpen({ target, windowUrl, config } = {}) {
+  if (isInAppUrl(target, windowUrl, config)) return { action: 'allow', openExternal: false };
+  return { action: 'deny', openExternal: isSafeExternalScheme(target) };
+}
+
+// Web permissions (DESK-3): deny by default. Only what the CRM actually uses,
+// and only when the requesting page is the configured in-app origin. Camera,
+// microphone ('media'), geolocation, clipboard-read, display-capture,
+// pointer lock, HID/USB/serial etc. are never granted to the (possibly
+// MITM'd, plaintext-http) remote page. 'openExternal' is ALWAYS denied here —
+// links that may leave the app go through safeOpenExternal after the
+// navigation policy above, never through Chromium's own protocol launcher.
+export const ALLOWED_PERMISSIONS = new Set(['notifications', 'clipboard-sanitized-write', 'fullscreen']);
+
+export function decidePermission({ permission, requestingUrl, windowUrl, config } = {}) {
+  if (permission === 'openExternal') return false;
+  if (!ALLOWED_PERMISSIONS.has(permission)) return false;
+  return isInAppUrl(requestingUrl, windowUrl, config);
 }

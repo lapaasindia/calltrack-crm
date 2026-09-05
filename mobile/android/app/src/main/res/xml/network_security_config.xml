@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The office server is plain HTTP on a private WPA2 LAN (no practical way to
-     get a TLS cert for an offline box; the protected WiFi is the security
-     boundary, as documented). Android matches network-security domains by
-     hostname, not CIDR, so a subnet allow-list isn't possible for arbitrary
-     LAN IPs — cleartext is permitted broadly for this internal sideloaded app.
-     The pairing token is revocable, scoping the exposure. -->
+<!-- The office server is plain HTTP on a private WPA2 LAN today (no practical
+     way to get a public TLS cert for an offline box; the protected WiFi is the
+     security boundary, as documented). Android matches network-security
+     domains by hostname, not CIDR, so a subnet allow-list isn't possible for
+     arbitrary LAN IPs — cleartext stays permitted for this internal sideloaded
+     app until TLS is rolled out.
+
+     MOB-9 groundwork: trust USER-installed CAs as well as the system store, so
+     an admin can install the office's own (mkcert / self-signed) root CA on
+     each phone and switch the server to https:// without every phone failing
+     the handshake. Once all phones pair over https, flip
+     cleartextTrafficPermitted to "false". -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
 </network-security-config>

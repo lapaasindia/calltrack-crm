@@ -1,9 +1,15 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso, utcIsoToDtLocal } from '../api.js';
-import { useApp } from '../App.jsx';
-import { Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal,
-  ScoreBadge, AiIntelPanel, TranscriptToggle } from '../components.jsx';
+import {
+  api, rupees, fmtDateTime, fmtDate, telLink, todayIstDate, dtLocalToUtcIso, utcIsoToDtLocal, goBack,
+} from '../api.js';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
+import { isAdmin, isAssignable } from '../permissions.js';
+import {
+  Modal, Seg, StageBadge, STAGE_LABELS, LogCallModal, WhatsAppButton, TaskModal,
+  ScoreBadge, AiIntelPanel, TranscriptToggle, ErrorState, LoadingState, Field,
+} from '../components.jsx';
 
 const DISPOSITION_LABELS = {
   connected: '✅ Connected', not_picked: '📵 Not picked', busy: '⏳ Busy',
@@ -15,6 +21,13 @@ const OUTCOME_LABELS = {
   dispute: 'Dispute', resolved: 'Resolved', open: 'Still open', escalated: 'Escalated',
 };
 const TYPE_LABELS = { sales: 'Sales', follow_up: 'Follow-up', collection: 'Payment', support: 'Support' };
+// Stages a lead can be moved to directly from its page (won → deal flow,
+// lost → reason prompt).
+const OPEN_STAGES = [['new', 'New'], ['contacted', 'Contacted'], ['interested', 'Interested'], ['follow_up', 'Follow-up']];
+
+// Stable ids for editable/removable rows (CLIENT-28).
+let rowSeq = 0;
+const rowId = () => `r${++rowSeq}`;
 
 function WinDealModal({ lead, onClose, onSaved }) {
   const { showToast } = useApp();
@@ -23,7 +36,6 @@ function WinDealModal({ lead, onClose, onSaved }) {
   const [value, setValue] = useState('');
   const [emiCount, setEmiCount] = useState(1);
   const [installments, setInstallments] = useState([]);
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     api.get('/api/products').then((p) => {
@@ -52,6 +64,7 @@ function WinDealModal({ lead, onClose, onSaved }) {
       const lastDay = new Date(Date.UTC(y, m - 1 + i + 1, 0)).getUTCDate();
       const d = new Date(Date.UTC(y, m - 1 + i, Math.min(day, lastDay)));
       rows.push({
+        id: rowId(),
         amount_rupees: (i === emiCount - 1 ? total - per * (emiCount - 1) : per) / 100,
         due_date: d.toISOString().slice(0, 10),
       });
@@ -59,30 +72,28 @@ function WinDealModal({ lead, onClose, onSaved }) {
     setInstallments(rows);
   }, [emiCount, value]);
 
-  const setInst = (i, k, v) => {
-    setInstallments((rows) => rows.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+  const setInst = (id, k, v) => {
+    setInstallments((rows) => rows.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
   };
 
   const total = Math.round(Number(value) * 100);
   const schedTotal = installments.reduce((s, r) => s + Math.round(Number(r.amount_rupees) * 100), 0);
   const mismatch = emiCount >= 2 && total !== schedTotal;
 
-  const save = async () => {
-    setSaving(true);
+  const [save, saving] = useSubmit(async () => {
     try {
       await api.post(`/api/leads/${lead.id}/deals`, {
         product_id: Number(productId),
         deal_value_rupees: Number(value),
-        installments: emiCount >= 2 ? installments : [],
+        installments: emiCount >= 2 ? installments.map(({ amount_rupees, due_date }) => ({ amount_rupees, due_date })) : [],
       });
       showToast('Deal won! 🎉');
       onSaved();
       onClose();
     } catch (err) {
       showToast(err.message, 'error');
-      setSaving(false);
     }
-  };
+  });
 
   return (
     <Modal title={`Win deal — ${lead.name}`} onClose={onClose}>
@@ -93,50 +104,46 @@ function WinDealModal({ lead, onClose, onSaved }) {
           </div>
         </div>
       ) : (
-        <div className="field">
-          <label>Product / program</label>
+        <Field label="Product / program">
           <select value={productId} onChange={(e) => pickProduct(e.target.value)}>
             {products.map((p) => (
               <option key={p.id} value={p.id}>{p.name} — {rupees(p.price_paise)}</option>
             ))}
           </select>
-        </div>
+        </Field>
       )}
       <div className="form-grid">
-        <div className="field">
-          <label>Deal value (₹)</label>
+        <Field label="Deal value (₹)" hint="Edit if you gave a discount">
           <input inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value)} />
-          <div className="hint">Edit if you gave a discount</div>
-        </div>
-        <div className="field">
-          <label>Payment plan</label>
+        </Field>
+        <Field label="Payment plan">
           <select value={emiCount} onChange={(e) => setEmiCount(Number(e.target.value))}>
             <option value={1}>Full payment</option>
             {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} installments</option>)}
           </select>
-        </div>
+        </Field>
       </div>
       {emiCount >= 2 && (
         <div className="field">
           <label>EMI schedule</label>
           {installments.map((r, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
-              <input style={{ flex: 1 }} inputMode="numeric" value={r.amount_rupees}
-                onChange={(e) => setInst(i, 'amount_rupees', e.target.value)} />
-              <input style={{ flex: 1.4 }} type="date" value={r.due_date}
-                onChange={(e) => setInst(i, 'due_date', e.target.value)} />
+            <div key={r.id} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+              <input style={{ flex: 1 }} inputMode="numeric" aria-label={`EMI ${i + 1} amount`} value={r.amount_rupees}
+                onChange={(e) => setInst(r.id, 'amount_rupees', e.target.value)} />
+              <input style={{ flex: 1.4 }} type="date" aria-label={`EMI ${i + 1} due date`} value={r.due_date}
+                onChange={(e) => setInst(r.id, 'due_date', e.target.value)} />
             </div>
           ))}
           {mismatch && (
             <div className="err">
-              Schedule adds to ₹{(schedTotal / 100).toLocaleString('en-IN')}, deal is ₹{(total / 100).toLocaleString('en-IN')}
+              Schedule adds to {rupees(schedTotal)}, deal is {rupees(total)}
             </div>
           )}
         </div>
       )}
       <div className="modal-actions">
-        <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn green" disabled={saving || !productId || !(total > 0) || mismatch} onClick={save}>
+        <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn green" disabled={saving || !productId || !(total > 0) || mismatch} onClick={save}>
           {saving ? 'Saving…' : 'Mark as Won 🏆'}
         </button>
       </div>
@@ -157,13 +164,11 @@ function PaymentModal({ deal, onClose, onSaved }) {
     return String(deal.pending_paise / 100);
   });
   const [method, setMethod] = useState('upi');
-  const [instId, setInstId] = useState(pendingInst[0]?.id ? String(pendingInst[0].id) : '');
+  const [instId, setInstId] = useState(pendingInst[0] && pendingInst[0].id ? String(pendingInst[0].id) : '');
   const [reference, setReference] = useState('');
   const [receivedDate, setReceivedDate] = useState(todayIstDate());
-  const [saving, setSaving] = useState(false);
 
-  const save = async () => {
-    setSaving(true);
+  const [save, saving] = useSubmit(async () => {
     try {
       await api.post(`/api/deals/${deal.id}/payments`, {
         amount_rupees: Number(amount), method,
@@ -175,49 +180,42 @@ function PaymentModal({ deal, onClose, onSaved }) {
       onClose();
     } catch (err) {
       showToast(err.message, 'error');
-    } finally {
-      setSaving(false);
     }
-  };
+  });
 
   return (
     <Modal title={`Record payment — ${deal.product_name}`} onClose={onClose}>
       <div className="form-grid">
-        <div className="field">
-          <label>Amount (₹) — pending {rupees(deal.pending_paise)}</label>
-          <input inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
-        </div>
-        <div className="field">
-          <label>Method</label>
+        <Field label={`Amount (₹) — pending ${rupees(deal.pending_paise)}`}>
+          <input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
+        </Field>
+        <Field label="Method">
           <select value={method} onChange={(e) => setMethod(e.target.value)}>
             <option value="upi">UPI</option><option value="cash">Cash</option>
             <option value="bank_transfer">Bank transfer</option><option value="card">Card</option>
             <option value="cheque">Cheque</option><option value="other">Other</option>
           </select>
-        </div>
+        </Field>
         {pendingInst.length > 0 && (
-          <div className="field">
-            <label>Against EMI</label>
+          <Field label="Against EMI">
             <select value={instId} onChange={(e) => setInstId(e.target.value)}>
               <option value="">No specific EMI</option>
               {pendingInst.map((i) => (
                 <option key={i.id} value={i.id}>EMI {i.seq} — {rupees(i.amount_paise)} due {fmtDate(i.due_date)}</option>
               ))}
             </select>
-          </div>
+          </Field>
         )}
-        <div className="field">
-          <label>Received on</label>
+        <Field label="Received on">
           <input type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Reference (UTR / receipt no.)</label>
+        </Field>
+        <Field label="Reference (UTR / receipt no.)">
           <input value={reference} onChange={(e) => setReference(e.target.value)} />
-        </div>
+        </Field>
       </div>
       <div className="modal-actions">
-        <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn green" disabled={saving || !(Number(amount) > 0)} onClick={save}>
+        <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn green" disabled={saving || !(Number(amount) > 0)} onClick={save}>
           {saving ? 'Saving…' : 'Record payment'}
         </button>
       </div>
@@ -227,8 +225,7 @@ function PaymentModal({ deal, onClose, onSaved }) {
 
 // Generate a GST invoice for a won lead. Seeds Bill To + line items from the
 // lead / its first deal; live subtotal/GST/total are computed CLIENT-SIDE in
-// integer paise (gst_percent from settings). On create, offers Open / Print
-// which opens the print-ready HTML in a new tab.
+// integer paise (gst_percent from settings) and shown to the paisa.
 function GenerateInvoiceModal({ lead, onClose }) {
   const { showToast } = useApp();
   const navigate = useNavigate();
@@ -242,19 +239,18 @@ function GenerateInvoiceModal({ lead, onClose }) {
   const deal = lead.deals && lead.deals[0];
   const [rows, setRows] = useState(() => {
     if (deal) {
-      return [{ description: deal.product_name, qty: 1, unit_rupees: String(deal.deal_value_paise / 100) }];
+      return [{ id: rowId(), description: deal.product_name, qty: 1, unit_rupees: String(deal.deal_value_paise / 100) }];
     }
-    return [{ description: 'Consulting Services', qty: 1, unit_rupees: '' }];
+    return [{ id: rowId(), description: 'Consulting Services', qty: 1, unit_rupees: '' }];
   });
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    api.get('/api/settings').then((s) => setGstPercent(Number(s.gst_percent ?? 18))).catch(() => {});
+    api.get('/api/settings').then((s) => setGstPercent(Number(s.gst_percent != null ? s.gst_percent : 18))).catch(() => {});
   }, []);
 
-  const setRow = (i, k, v) => setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
-  const addRow = () => setRows((rs) => [...rs, { description: '', qty: 1, unit_rupees: '' }]);
-  const removeRow = (i) => setRows((rs) => rs.filter((_, idx) => idx !== i));
+  const setRow = (id, k, v) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
+  const addRow = () => setRows((rs) => [...rs, { id: rowId(), description: '', qty: 1, unit_rupees: '' }]);
+  const removeRow = (id) => setRows((rs) => rs.filter((r) => r.id !== id));
 
   // All paise. Blank/invalid unit → 0 for the preview.
   const unitPaise = (r) => Math.round(Number(r.unit_rupees) * 100) || 0;
@@ -267,12 +263,11 @@ function GenerateInvoiceModal({ lead, onClose }) {
     && rows.every((r) => r.description.trim() && unitPaise(r) >= 0)
     && subtotal > 0;
 
-  const create = async () => {
-    setSaving(true);
+  const [create, saving] = useSubmit(async () => {
     try {
       const res = await api.post('/api/invoices', {
         lead_id: lead.id,
-        deal_id: deal?.id || null,
+        deal_id: deal ? deal.id : null,
         ...billTo,
         items: rows.map((r) => ({
           description: r.description.trim(),
@@ -280,55 +275,47 @@ function GenerateInvoiceModal({ lead, onClose }) {
           unit_price_paise: unitPaise(r),
         })),
       });
-      showToast('Invoice created ✓');
+      showToast('Invoice created ✓ — open or print it from the invoice page');
       onClose();
-      if (window.confirm('Invoice created. Open the print-ready version now?')) {
-        window.open(`/api/invoices/${res.id}/html`, '_blank');
-      }
       navigate(`/invoices/${res.id}`);
     } catch (err) {
       showToast(err.message, 'error');
-      setSaving(false);
     }
-  };
+  });
 
   return (
     <Modal title={`Generate invoice — ${lead.name}`} onClose={onClose}>
       <div className="form-grid">
-        <div className="field">
-          <label>Bill to (name)</label>
+        <Field label="Bill to (name)">
           <input value={billTo.bill_to_name}
             onChange={(e) => setBillTo((v) => ({ ...v, bill_to_name: e.target.value }))} />
-        </div>
-        <div className="field">
-          <label>Phone</label>
-          <input value={billTo.bill_to_phone}
+        </Field>
+        <Field label="Phone">
+          <input value={billTo.bill_to_phone} inputMode="tel"
             onChange={(e) => setBillTo((v) => ({ ...v, bill_to_phone: e.target.value }))} />
-        </div>
-        <div className="field">
-          <label>Email</label>
-          <input value={billTo.bill_to_email}
+        </Field>
+        <Field label="Email">
+          <input value={billTo.bill_to_email} type="email"
             onChange={(e) => setBillTo((v) => ({ ...v, bill_to_email: e.target.value }))} />
-        </div>
-        <div className="field">
-          <label>Address</label>
+        </Field>
+        <Field label="Address">
           <input value={billTo.bill_to_address}
             onChange={(e) => setBillTo((v) => ({ ...v, bill_to_address: e.target.value }))} />
-        </div>
+        </Field>
       </div>
 
       <div className="field">
         <label>Line items</label>
         {rows.map((r, i) => (
-          <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
-            <input style={{ flex: 2 }} placeholder="Description" value={r.description}
-              onChange={(e) => setRow(i, 'description', e.target.value)} />
-            <input style={{ width: 56 }} inputMode="numeric" placeholder="Qty" value={r.qty}
-              onChange={(e) => setRow(i, 'qty', e.target.value)} />
-            <input style={{ flex: 1 }} inputMode="numeric" placeholder="₹ unit" value={r.unit_rupees}
-              onChange={(e) => setRow(i, 'unit_rupees', e.target.value)} />
-            <button type="button" className="btn small secondary" disabled={rows.length === 1}
-              onClick={() => removeRow(i)}>✕</button>
+          <div key={r.id} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+            <input style={{ flex: 2 }} placeholder="Description" aria-label={`Line ${i + 1} description`} value={r.description}
+              onChange={(e) => setRow(r.id, 'description', e.target.value)} />
+            <input style={{ width: 64 }} inputMode="numeric" placeholder="Qty" aria-label={`Line ${i + 1} quantity`} value={r.qty}
+              onChange={(e) => setRow(r.id, 'qty', e.target.value)} />
+            <input style={{ flex: 1 }} inputMode="decimal" placeholder="₹ unit" aria-label={`Line ${i + 1} unit price`} value={r.unit_rupees}
+              onChange={(e) => setRow(r.id, 'unit_rupees', e.target.value)} />
+            <button type="button" className="btn small secondary" disabled={rows.length === 1} aria-label={`Remove line ${i + 1}`}
+              onClick={() => removeRow(r.id)}>✕</button>
           </div>
         ))}
         <button type="button" className="btn small secondary" onClick={addRow}>+ Add line</button>
@@ -341,8 +328,8 @@ function GenerateInvoiceModal({ lead, onClose }) {
       </div>
 
       <div className="modal-actions">
-        <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={saving || !valid} onClick={create}>
+        <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" disabled={saving || !valid} onClick={create}>
           {saving ? 'Creating…' : 'Create invoice'}
         </button>
       </div>
@@ -356,8 +343,8 @@ function FollowUpModal({ lead, onClose, onSaved }) {
   // Reschedule pre-fills the current due date/reason so the admin sees what
   // they're changing (and isn't forced to retype the time from scratch).
   const [dueAt, setDueAt] = useState(existing ? utcIsoToDtLocal(existing.due_at) : '');
-  const [reason, setReason] = useState(existing?.reason || '');
-  const save = async () => {
+  const [reason, setReason] = useState((existing && existing.reason) || '');
+  const [save, saving] = useSubmit(async () => {
     try {
       await api.put(`/api/leads/${lead.id}/follow-up`, {
         due_at: dtLocalToUtcIso(dueAt), reason: reason || 'Follow-up',
@@ -365,48 +352,120 @@ function FollowUpModal({ lead, onClose, onSaved }) {
       showToast(existing ? 'Follow-up rescheduled ✓' : 'Follow-up scheduled ✓');
       onSaved(); onClose();
     } catch (err) { showToast(err.message, 'error'); }
-  };
+  });
   return (
     <Modal title={existing ? 'Reschedule follow-up' : 'Schedule follow-up'} onClose={onClose}>
-      <div className="field">
-        <label>When</label>
+      <Field label="When (IST)">
         <input type="datetime-local" value={dueAt} onChange={(e) => setDueAt(e.target.value)} autoFocus />
-      </div>
-      <div className="field">
-        <label>Reason</label>
+      </Field>
+      <Field label="Reason">
         <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Send payment link" />
-      </div>
+      </Field>
       <div className="modal-actions">
-        <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={!dueAt} onClick={save}>{existing ? 'Reschedule' : 'Schedule'}</button>
+        <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" disabled={!dueAt || saving} onClick={save}>{saving ? 'Saving…' : existing ? 'Reschedule' : 'Schedule'}</button>
       </div>
+    </Modal>
+  );
+}
+
+// Edit the lead's core fields (QA-8) through the existing PATCH. A duplicate
+// phone answers 409 → look the other lead up so the user can jump to it.
+function EditLeadModal({ lead, onClose, onSaved }) {
+  const { showToast } = useApp();
+  const [form, setForm] = useState({
+    name: lead.name || '', phone: lead.phone || '', alt_phone: lead.alt_phone || '',
+    email: lead.email || '', city: lead.city || '', source: lead.source || '', notes: lead.notes || '',
+  });
+  const [dupOf, setDupOf] = useState(null);
+  const set = (k) => (e) => { const v = e.target.value; setForm((f) => ({ ...f, [k]: v })); if (k === 'phone') setDupOf(null); };
+
+  const [save, saving] = useSubmit(async () => {
+    const body = {};
+    for (const k of ['name', 'alt_phone', 'email', 'city', 'source', 'notes']) {
+      if ((form[k] || '') !== (lead[k] || '')) body[k] = form[k];
+    }
+    if (form.phone.trim() !== (lead.phone || '')) body.phone = form.phone.trim();
+    if (body.name !== undefined && !body.name.trim()) { showToast('Name is required', 'error'); return; }
+    if (!Object.keys(body).length) { onClose(); return; }
+    try {
+      await api.patch(`/api/leads/${lead.id}`, body);
+      showToast('Lead updated ✓');
+      onSaved(); onClose();
+    } catch (err) {
+      if (err.status === 409 && body.phone) {
+        try {
+          const chk = await api.get(`/api/leads/check-phone?phone=${encodeURIComponent(body.phone)}`);
+          if (chk && chk.duplicate) setDupOf(chk.duplicate);
+        } catch { /* fall through to the toast */ }
+      }
+      showToast(err.message, 'error');
+    }
+  });
+
+  return (
+    <Modal title="Edit lead" onClose={onClose}>
+      <form onSubmit={(e) => { e.preventDefault(); save(); }}>
+        <div className="form-grid">
+          <Field label="Name *"><input value={form.name} onChange={set('name')} autoFocus /></Field>
+          <Field label="Phone *" error={dupOf ? undefined : undefined}>
+            <input inputMode="tel" value={form.phone} onChange={set('phone')} />
+          </Field>
+          {dupOf && (
+            <div className="field err" style={{ gridColumn: '1 / -1' }}>
+              Another lead already has this number: {dupOf.mine
+                ? <Link to={`/leads/${dupOf.id}`} onClick={onClose}>{dupOf.name}</Link>
+                : 'another team member\'s lead — ask an admin'}
+            </div>
+          )}
+          <Field label="Alt phone"><input inputMode="tel" value={form.alt_phone} onChange={set('alt_phone')} /></Field>
+          <Field label="Email"><input type="email" value={form.email} onChange={set('email')} /></Field>
+          <Field label="City"><input value={form.city} onChange={set('city')} /></Field>
+          <Field label="Source"><input value={form.source} onChange={set('source')} /></Field>
+        </div>
+        <Field label="Notes"><textarea rows={4} value={form.notes} onChange={set('notes')} /></Field>
+        <div className="modal-actions">
+          <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn" disabled={saving || !form.name.trim() || !form.phone.trim()}>
+            {saving ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }
 
 export default function LeadDetail() {
   const { id } = useParams();
-  const { user, showToast } = useApp();
+  const { user, showToast, askConfirm, askPrompt, canWrite } = useApp();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [lead, setLead] = useState(null);
-  const [error, setError] = useState(null);
-  const [modal, setModal] = useState(null); // 'call' | 'win' | 'followup' | {payment: deal}
+  const [modal, setModal] = useState(null); // 'call' | 'win' | 'followup' | 'invoice' | 'task' | 'edit' | {payment: deal}
   const [users, setUsers] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [cloudEnabled, setCloudEnabled] = useState(false);
   const [transcribingId, setTranscribingId] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const teamView = isAdmin(user.role);
 
-  const load = useCallback(() => {
-    api.get(`/api/leads/${id}`).then(setLead).catch((e) => setError(e.message));
-    api.get(`/api/ai/suggestions?lead_id=${id}`).then(setSuggestions).catch(() => {});
-  }, [id]);
+  const { data: lead, error, loading, reload } = useRequest(
+    ({ signal }) => api.get(`/api/leads/${id}`, { signal }), [id],
+  );
+  const load = reload;
+  const suggestionsLoaded = useRef(null);
+  useEffect(() => {
+    suggestionsLoaded.current = id;
+    api.get(`/api/ai/suggestions?lead_id=${id}`).then((s) => { if (suggestionsLoaded.current === id) setSuggestions(s); }).catch(() => {});
+    return () => { suggestionsLoaded.current = null; };
+  }, [id, lead]);
 
   const transcribeCloud = async (recordingId) => {
-    if (!window.confirm(
-      'Send this one recording to Sarvam (cloud) for Hindi transcription?\n\n'
-      + 'This is the only time audio leaves the office. Continue?'
-    )) return;
+    const ok = await askConfirm({
+      title: 'Send this recording to Sarvam (cloud)?',
+      message: 'Hindi transcription for this ONE recording. This is the only time audio leaves the office. Continue?',
+      confirmLabel: 'Send to Sarvam',
+    });
+    if (!ok) return;
     setTranscribingId(recordingId);
     try {
       await api.post(`/api/recordings/${recordingId}/transcribe-cloud`);
@@ -417,12 +476,15 @@ export default function LeadDetail() {
   };
 
   const actSuggestion = async (s, action) => {
+    if (busyId) return;
+    setBusyId(s.id);
     try {
       await api.post(`/api/ai/suggestions/${s.id}/${action}`);
       load();
     } catch (err) { showToast(err.message, 'error'); }
+    finally { setBusyId(null); }
   };
-  useEffect(() => { load(); }, [load]);
+
   // Deep-link from the Kanban board: dropping a lead into "Won" navigates here
   // with ?win=1 to open the Win Deal flow directly. Consume the param once so a
   // refresh doesn't reopen it.
@@ -435,24 +497,49 @@ export default function LeadDetail() {
     }
   }, [searchParams, setSearchParams]);
   useEffect(() => {
-    if (user.role === 'admin') {
-      api.get('/api/users').then((u) => setUsers(u.filter((x) => x.is_active))).catch(() => {});
+    if (teamView) {
+      api.get('/api/users').then((u) => setUsers(u.filter(isAssignable))).catch(() => {});
     }
+    // Only the admin tier receives ai_cloud_enabled; everyone else gets the
+    // public subset, so the button simply stays hidden for them.
     api.get('/api/settings').then((s) => setCloudEnabled(!!s.ai_cloud_enabled)).catch(() => {});
-  }, [user.role]);
+  }, [teamView]);
 
-  if (error) return <div className="card empty"><div className="big">🚫</div>{error}</div>;
-  if (!lead) return null;
+  if (!lead) {
+    if (error) {
+      return (
+        <>
+          <div className="page-title">
+            <h1><button type="button" className="back-btn" aria-label="Back" onClick={() => goBack(navigate, '/leads')}>←</button> Lead</h1>
+          </div>
+          <ErrorState error={error} onRetry={reload} />
+        </>
+      );
+    }
+    return loading ? <LoadingState /> : null;
+  }
 
   const setStage = async (stage) => {
-    if (stage === 'won') return setModal('win');
-    let lost_reason;
+    if (stage === lead.stage) return;
+    if (stage === 'won') { setModal('win'); return; }
+    const body = { stage };
     if (stage === 'lost') {
-      lost_reason = window.prompt('Reason for losing this lead?') || 'Not specified';
-      if (lost_reason === null) return;
+      const reason = await askPrompt({
+        title: 'Mark lead as lost', label: 'Reason for losing this lead', required: true, multiline: true,
+        submitLabel: 'Mark lost', danger: true,
+      });
+      if (reason == null) return; // cancelled — nothing changes (CLIENT-5)
+      body.lost_reason = reason || 'Not specified';
+    } else {
+      const note = await askPrompt({
+        title: `Move to ${STAGE_LABELS[stage]}`, label: 'Note (optional)', multiline: true, submitLabel: 'Move',
+      });
+      if (note == null) return;
+      if (note) body.note = note;
     }
     try {
-      await api.patch(`/api/leads/${lead.id}`, { stage, lost_reason });
+      await api.patch(`/api/leads/${lead.id}`, body);
+      showToast(stage === 'lost' ? 'Marked as lost' : `Moved to ${STAGE_LABELS[stage]} ✓`);
       load();
     } catch (err) { showToast(err.message, 'error'); }
   };
@@ -464,11 +551,25 @@ export default function LeadDetail() {
     } catch (err) { showToast(err.message, 'error'); }
   };
 
+  const cancelFollowUp = async () => {
+    const ok = await askConfirm({
+      title: 'Cancel this follow-up?',
+      message: `${fmtDateTime(lead.follow_up.due_at)} — ${lead.follow_up.reason}\n\nThe lead drops out of the Today queue until you schedule another one.`,
+      confirmLabel: 'Cancel follow-up', cancelLabel: 'Keep it', danger: true,
+    });
+    if (!ok) return;
+    try { await api.del(`/api/leads/${lead.id}/follow-up`); showToast('Follow-up cancelled'); load(); }
+    catch (err) { showToast(err.message, 'error'); }
+  };
+
   const deletePayment = async (p, deal) => {
     const after = rupees(deal.pending_paise + p.amount_paise);
-    if (!window.confirm(
-      `Delete this payment of ${rupees(p.amount_paise)}?\n\nPending balance will go back up to ${after}.`
-    )) return;
+    const ok = await askConfirm({
+      title: `Delete this payment of ${rupees(p.amount_paise)}?`,
+      message: `Pending balance will go back up to ${after}.`,
+      confirmLabel: 'Delete payment', danger: true,
+    });
+    if (!ok) return;
     try { await api.del(`/api/payments/${p.id}`); showToast('Payment deleted'); load(); }
     catch (err) { showToast(err.message, 'error'); }
   };
@@ -478,16 +579,18 @@ export default function LeadDetail() {
     ...lead.events.map((e) => ({ kind: 'event', at: e.changed_at, e })),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
+  const openStage = !['won', 'lost'].includes(lead.stage);
+
   return (
     <>
       <div className="page-title">
         <h1 style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <a onClick={() => navigate(-1)} style={{ cursor: 'pointer' }}>←</a>
-          {lead.name} <StageBadge stage={lead.stage} />
+          <button type="button" className="back-btn" aria-label="Back" onClick={() => goBack(navigate, '/leads')}>←</button>
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{lead.name}</span> <StageBadge stage={lead.stage} />
           <ScoreBadge score={lead.score} factors={lead.score_factors} />
         </h1>
         <div className="actions">
-          <a className="act-btn call" href={telLink(lead.phone)} title="Call">📞</a>
+          <a className="act-btn call" href={telLink(lead.phone)} title="Call" aria-label={`Call ${lead.name}`}>📞</a>
           <WhatsAppButton lead={lead} context={lead.deals[0] ? {
             product: lead.deals[0].product_name,
             amount_due_paise: lead.deals[0].pending_paise > 0 ? lead.deals[0].pending_paise : null,
@@ -495,8 +598,10 @@ export default function LeadDetail() {
         </div>
       </div>
 
+      {error && <ErrorState error={error} onRetry={reload} compact />}
+
       <div className="card">
-        <div className="meta" style={{ fontSize: 14, color: 'var(--ink-soft)', lineHeight: 1.8 }}>
+        <div className="meta" style={{ fontSize: 14, color: 'var(--ink-soft)', lineHeight: 1.8, overflowWrap: 'anywhere' }}>
           📱 <b style={{ color: 'var(--ink)' }}>{lead.phone}</b>
           {lead.alt_phone && <> · alt: {lead.alt_phone}</>}
           {lead.city && <> · 📍 {lead.city}</>}
@@ -505,49 +610,71 @@ export default function LeadDetail() {
           Source: <b style={{ color: 'var(--ink)' }}>{lead.source}</b>
           {' · '}Assigned: <b style={{ color: 'var(--ink)' }}>{lead.assigned_to_name || 'unassigned'}</b>
           {lead.stage === 'lost' && lead.lost_reason && <> · Lost: {lead.lost_reason}</>}
-          {lead.notes && <><br />📝 {lead.notes}</>}
+          {lead.notes && <><br /><span style={{ whiteSpace: 'pre-wrap' }}>📝 {lead.notes}</span></>}
         </div>
-        {user.role === 'admin' && (
-          <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <select value={lead.assigned_to || ''} onChange={(e) => reassign(e.target.value)}
-              style={{ padding: 7, border: '1px solid var(--line)', borderRadius: 8, fontSize: 13 }}>
-              <option value="">Unassigned</option>
-              {users.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-            </select>
-          </div>
-        )}
+        <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {canWrite && (
+            <button type="button" className="btn small secondary" onClick={() => setModal('edit')}>✏️ Edit details</button>
+          )}
+          {teamView && canWrite && (
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ink-soft)' }}>
+              Assign to
+              <select value={lead.assigned_to || ''} onChange={(e) => reassign(e.target.value)}
+                style={{ padding: 7, border: '1px solid var(--line)', borderRadius: 8, fontSize: 13, minHeight: 36 }}>
+                <option value="">Unassigned</option>
+                {users.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
       </div>
 
       {lead.follow_up && (
-        <div className="card" style={{ borderLeft: '4px solid var(--brand)' }}>
-          <b>⏰ Follow-up:</b> {fmtDateTime(lead.follow_up.due_at)} — {lead.follow_up.reason}
-          <button className="btn small secondary" style={{ marginLeft: 10 }}
-            onClick={() => setModal('followup')}>Reschedule</button>
+        <div className="card" style={{ borderLeft: '4px solid var(--brand)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 200 }}>
+            <b>⏰ Follow-up:</b> {fmtDateTime(lead.follow_up.due_at)} — {lead.follow_up.reason}
+          </span>
+          {canWrite && (
+            <span style={{ display: 'flex', gap: 6 }}>
+              <button type="button" className="btn small secondary" onClick={() => setModal('followup')}>Reschedule</button>
+              <button type="button" className="btn small secondary danger-text" onClick={cancelFollowUp}>Cancel follow-up</button>
+            </span>
+          )}
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-        <button className="btn" onClick={() => setModal('call')}>✍️ Log call</button>
-        {!['won', 'lost'].includes(lead.stage) && (
-          <button className="btn green" onClick={() => setModal('win')}>🏆 Win deal</button>
-        )}
-        {lead.stage === 'won' && (
-          <button className="btn green" onClick={() => setModal('win')}>+ Another deal</button>
-        )}
-        {(lead.stage === 'won' || lead.deals.length > 0) && (
-          <button className="btn secondary" onClick={() => setModal('invoice')}>🧾 Generate invoice</button>
-        )}
-        {!lead.follow_up && (
-          <button className="btn secondary" onClick={() => setModal('followup')}>⏰ Schedule follow-up</button>
-        )}
-        <button className="btn secondary" onClick={() => setModal('task')}>✅ Add task</button>
-        {lead.stage !== 'lost' && lead.stage !== 'won' && (
-          <button className="btn secondary" onClick={() => setStage('lost')}>Mark lost</button>
-        )}
-        {lead.stage === 'lost' && (
-          <button className="btn secondary" onClick={() => setStage('interested')}>Reopen lead</button>
-        )}
-      </div>
+      {canWrite && (
+        <>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <button type="button" className="btn" onClick={() => setModal('call')}>✍️ Log call</button>
+            {openStage && (
+              <button type="button" className="btn green" onClick={() => setModal('win')}>🏆 Win deal</button>
+            )}
+            {lead.stage === 'won' && (
+              <button type="button" className="btn green" onClick={() => setModal('win')}>+ Another deal</button>
+            )}
+            {(lead.stage === 'won' || lead.deals.length > 0) && (
+              <button type="button" className="btn secondary" onClick={() => setModal('invoice')}>🧾 Generate invoice</button>
+            )}
+            {!lead.follow_up && (
+              <button type="button" className="btn secondary" onClick={() => setModal('followup')}>⏰ Schedule follow-up</button>
+            )}
+            <button type="button" className="btn secondary" onClick={() => setModal('task')}>✅ Add task</button>
+            {openStage && (
+              <button type="button" className="btn secondary danger-text" onClick={() => setStage('lost')}>Mark lost</button>
+            )}
+            {lead.stage === 'lost' && (
+              <button type="button" className="btn secondary" onClick={() => setStage('interested')}>Reopen lead</button>
+            )}
+          </div>
+          {openStage && (
+            <div className="field" style={{ marginBottom: 14 }}>
+              <label>Stage</label>
+              <Seg label="Stage" options={OPEN_STAGES} value={lead.stage} onChange={setStage} />
+            </div>
+          )}
+        </>
+      )}
 
       {suggestions.length > 0 && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)' }}>
@@ -559,10 +686,12 @@ export default function LeadDetail() {
                   <div className="name" style={{ fontSize: 14 }}>{s.label}</div>
                   {s.summary && <div className="meta">{s.summary}</div>}
                 </div>
-                <div className="actions">
-                  <button className="btn small green" onClick={() => actSuggestion(s, 'accept')}>Accept</button>
-                  <button className="btn small secondary" onClick={() => actSuggestion(s, 'dismiss')}>✕</button>
-                </div>
+                {canWrite && (
+                  <div className="actions">
+                    <button type="button" className="btn small green" disabled={busyId === s.id} onClick={() => actSuggestion(s, 'accept')}>Accept</button>
+                    <button type="button" className="btn small secondary" disabled={busyId === s.id} aria-label="Dismiss suggestion" onClick={() => actSuggestion(s, 'dismiss')}>✕</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -575,8 +704,8 @@ export default function LeadDetail() {
             {' '}<span className={`badge ${deal.status === 'completed' ? 'paid' : deal.status === 'cancelled' ? 'lost' : 'pending'}`}>{deal.status}</span>
           </h2>
           <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 10 }}>
-            <div><div className="tl-meta">Collected</div><b style={{ color: 'var(--green)' }}>{rupees(deal.paid_paise)}</b></div>
-            <div><div className="tl-meta">Pending</div><b style={{ color: deal.pending_paise > 0 ? 'var(--red)' : 'var(--green)' }}>{rupees(deal.pending_paise)}</b></div>
+            <div><div className="tl-meta">Collected</div><b style={{ color: 'var(--green-text)' }}>{rupees(deal.paid_paise)}</b></div>
+            <div><div className="tl-meta">Pending</div><b style={{ color: deal.pending_paise > 0 ? 'var(--red-text)' : 'var(--green-text)' }}>{rupees(deal.pending_paise)}</b></div>
             <div><div className="tl-meta">Won on</div><b>{fmtDate(deal.won_date)}</b></div>
           </div>
           {deal.installments.length > 0 && (
@@ -584,16 +713,17 @@ export default function LeadDetail() {
               <table className="data">
                 <thead><tr><th>EMI</th><th className="num">Amount</th><th>Due</th><th>Status</th></tr></thead>
                 <tbody>
-                  {deal.installments.map((i) => (
-                    <tr key={i.id}>
-                      <td>#{i.seq}</td>
-                      <td className="num">{rupees(i.amount_paise)}</td>
-                      <td>{fmtDate(i.due_date)}</td>
-                      <td><span className={`badge ${i.due_date < todayIstDate() && ['pending', 'partial'].includes(i.status) ? 'overdue' : i.status}`}>
-                        {i.due_date < todayIstDate() && ['pending', 'partial'].includes(i.status) ? 'overdue' : i.status}
-                      </span></td>
-                    </tr>
-                  ))}
+                  {deal.installments.map((i) => {
+                    const overdue = i.due_date < todayIstDate() && ['pending', 'partial'].includes(i.status);
+                    return (
+                      <tr key={i.id}>
+                        <td>#{i.seq}</td>
+                        <td className="num">{rupees(i.amount_paise)}</td>
+                        <td>{fmtDate(i.due_date)}</td>
+                        <td><span className={`badge ${overdue ? 'overdue' : i.status}`}>{overdue ? 'overdue' : i.status}</span></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -610,8 +740,8 @@ export default function LeadDetail() {
                         <td className="num"><b>{rupees(p.amount_paise)}</b></td>
                         <td>{p.method}{p.reference ? ` · ${p.reference}` : ''}</td>
                         <td>{p.recorded_by_name}</td>
-                        {user.role === 'admin' && (
-                          <td><button className="btn small secondary" onClick={() => deletePayment(p, deal)}>✕</button></td>
+                        {teamView && canWrite && (
+                          <td><button type="button" className="btn small secondary" aria-label="Delete payment" onClick={() => deletePayment(p, deal)}>✕</button></td>
                         )}
                       </tr>
                     ))}
@@ -620,8 +750,8 @@ export default function LeadDetail() {
               </div>
             </>
           )}
-          {deal.pending_paise > 0 && deal.status !== 'cancelled' && (
-            <button className="btn green" style={{ marginTop: 10 }}
+          {canWrite && deal.pending_paise > 0 && deal.status !== 'cancelled' && (
+            <button type="button" className="btn green" style={{ marginTop: 10 }}
               onClick={() => setModal({ payment: deal })}>💰 Record payment</button>
           )}
         </div>
@@ -631,9 +761,9 @@ export default function LeadDetail() {
         <h2>Timeline</h2>
         <div className="timeline">
           {timeline.length === 0 && <div className="empty">No activity yet. Log the first call!</div>}
-          {timeline.map((t, i) => t.kind === 'call' ? (
+          {timeline.map((t) => t.kind === 'call' ? (
             <div className="tl-item" key={`c${t.c.id}`}>
-              <div className="tl-icon">📞</div>
+              <div className="tl-icon" aria-hidden="true">📞</div>
               <div className="tl-body">
                 <div className="tl-title">
                   {DISPOSITION_LABELS[t.c.disposition]} · {TYPE_LABELS[t.c.call_type]}
@@ -654,9 +784,9 @@ export default function LeadDetail() {
                     )}
                     <TranscriptToggle transcript={t.c.recording_transcript}
                       translation={t.c.recording_translation} />
-                    {cloudEnabled && (
+                    {cloudEnabled && canWrite && (
                       <div style={{ marginTop: 6 }}>
-                        <button className="btn small secondary" disabled={transcribingId === t.c.recording_id}
+                        <button type="button" className="btn small secondary" disabled={transcribingId === t.c.recording_id}
                           onClick={() => transcribeCloud(t.c.recording_id)}>
                           {transcribingId === t.c.recording_id ? 'Transcribing…' : '☁️ Transcribe with Sarvam (cloud)'}
                         </button>
@@ -669,7 +799,7 @@ export default function LeadDetail() {
             </div>
           ) : (
             <div className="tl-item" key={`e${t.e.id}`}>
-              <div className="tl-icon" style={{ background: 'var(--amber-soft)', color: 'var(--amber)' }}>🔀</div>
+              <div className="tl-icon" style={{ background: 'var(--amber-soft)', color: 'var(--amber-text)' }} aria-hidden="true">🔀</div>
               <div className="tl-body">
                 <div className="tl-title">
                   {t.e.from_stage ? `${STAGE_LABELS[t.e.from_stage]} → ` : ''}{STAGE_LABELS[t.e.to_stage]}
@@ -690,7 +820,8 @@ export default function LeadDetail() {
       {modal === 'invoice' && <GenerateInvoiceModal lead={lead} onClose={() => setModal(null)} />}
       {modal === 'followup' && <FollowUpModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
       {modal === 'task' && <TaskModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
-      {modal?.payment && (
+      {modal === 'edit' && <EditLeadModal lead={lead} onClose={() => setModal(null)} onSaved={load} />}
+      {modal && modal.payment && (
         <PaymentModal deal={modal.payment} onClose={() => setModal(null)} onSaved={load} />
       )}
     </>

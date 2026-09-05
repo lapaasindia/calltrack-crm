@@ -5,15 +5,15 @@ import { isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { nowUtc, todayIst } from '../lib/istTime.js';
 import { changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
+// One money bound for every paise route (deals, invoices, products, catalog):
+// ₹100 crore (1e11 paise) — far above any real deal/payment and well under
+// Number.MAX_SAFE_INTEGER, past which JS integer math silently loses precision
+// and poisons SUM() rollups (audit M-6).
+import { MAX_PAISE } from './catalog.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const METHODS = ['upi', 'cash', 'bank_transfer', 'card', 'cheque', 'other'];
-
-// ₹10 crore per record is far above any real deal/payment, and well under
-// Number.MAX_SAFE_INTEGER paise — past which JS integer math silently loses
-// precision and poisons SUM() rollups (audit M-6).
-const MAX_PAISE = 100_00_00_000 * 100; // 10 crore rupees, in paise
 // Convert rupees → integer paise. Returns NaN for non-finite/out-of-range
 // input so the existing `Number.isFinite(value) && value > 0` guards reject it.
 const toPaise = (rupees) => {
@@ -213,48 +213,110 @@ router.put('/deals/:id/installments', (req, res) => {
   res.json({ ok: true });
 });
 
-// Collections overview: every active deal with balances + overdue installments.
+// Collections overview: deals with balances + next open installment.
+//
+// Default = deals with an OPEN balance (pending > 0); ?all=1 includes settled
+// ones. ?limit (default 500, max 5000) + ?offset page the list; `summary` and
+// `total` are always computed over the whole scope with one aggregate query,
+// so the tiles don't change meaning when the list is paged.
+//
+// Pre-aggregated payments/installments joins replace the correlated
+// subqueries that rescanned every pending installment per deal (12–14 s at 8k
+// deals, blocking every other user; SCALE-1) → ~25 ms.
+//
+// "overdue" = money is still OWED on past-due installments after subtracting
+// the payments linked to them AND the deal's unlinked payments (which the
+// Today queue applies FIFO to the earliest open installments — the past-due
+// ones). README: pending is deal value − payments, never derived from EMI
+// status. overdue_paise = MAX(past-due owed − unlinked, 0).
+// The `inst` subquery binds ONE parameter: today's IST date.
+const COLLECTIONS_JOINS = `
+  FROM deals d
+  JOIN products pr ON pr.id = d.product_id
+  JOIN leads l ON l.id = d.lead_id AND l.deleted_at IS NULL
+  LEFT JOIN users u ON u.id = l.assigned_to
+  LEFT JOIN (SELECT deal_id, SUM(amount_paise) AS paid_paise,
+                    SUM(CASE WHEN installment_id IS NULL THEN amount_paise ELSE 0 END) AS unlinked_paise
+               FROM payments GROUP BY deal_id) pay
+    ON pay.deal_id = d.id
+  LEFT JOIN (SELECT i.deal_id, MIN(i.due_date) AS next_due_date,
+                    SUM(CASE WHEN i.due_date < ? THEN i.amount_paise - COALESCE(ip.paid_paise, 0) ELSE 0 END) AS past_due_owed_paise
+               FROM installments i
+               LEFT JOIN (SELECT installment_id, SUM(amount_paise) AS paid_paise FROM payments
+                           WHERE installment_id IS NOT NULL GROUP BY installment_id) ip
+                 ON ip.installment_id = i.id
+              WHERE i.status IN ('pending','partial') GROUP BY i.deal_id) inst
+    ON inst.deal_id = d.id`;
+const OVERDUE_PAISE_SQL = 'MAX(COALESCE(inst.past_due_owed_paise, 0) - COALESCE(pay.unlinked_paise, 0), 0)';
+
 router.get('/collections', (req, res) => {
   const today = todayIst();
   // Scope non-admin roles to their own deals (audit H-7 — was `role==='caller'`,
   // which leaked all deals/balances/phones to agent/employee/read_only).
   let callerScope = '';
-  const params = [];
+  const scopeParams = [];
   if (!canSeeAllLeads(req.user.role)) {
     if (isReadOnly(req.user.role)) {
       callerScope = 'AND 1 = 0';
     } else {
       callerScope = 'AND l.assigned_to = ?';
-      params.push(req.user.id);
+      scopeParams.push(req.user.id);
     }
   }
+  const includeSettled = req.query.all === '1' || req.query.all === 'true';
+  const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit, 10) || 500));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const openOnly = includeSettled ? '' : 'AND (d.deal_value_paise - COALESCE(pay.paid_paise, 0)) > 0';
 
   const deals = db.prepare(
     `SELECT d.id, d.deal_value_paise, d.status, d.won_date, pr.name AS product_name,
             l.id AS lead_id, l.name, l.phone, l.assigned_to, u.full_name AS assigned_to_name,
-            COALESCE((SELECT SUM(amount_paise) FROM payments p WHERE p.deal_id = d.id), 0) AS paid_paise,
-            (SELECT MIN(due_date) FROM installments i WHERE i.deal_id = d.id AND i.status IN ('pending','partial')) AS next_due_date
-     FROM deals d
-     JOIN products pr ON pr.id = d.product_id
-     JOIN leads l ON l.id = d.lead_id AND l.deleted_at IS NULL
-     LEFT JOIN users u ON u.id = l.assigned_to
-     WHERE d.status != 'cancelled' ${callerScope}
-     ORDER BY d.won_date DESC`
-  ).all(...params);
+            COALESCE(pay.paid_paise, 0) AS paid_paise,
+            inst.next_due_date,
+            MIN(${OVERDUE_PAISE_SQL}, MAX(d.deal_value_paise - COALESCE(pay.paid_paise, 0), 0)) AS overdue_paise
+     ${COLLECTIONS_JOINS}
+     WHERE d.status != 'cancelled' ${callerScope} ${openOnly}
+     ORDER BY d.won_date DESC, d.id DESC
+     LIMIT ? OFFSET ?`
+  ).all(today, ...scopeParams, limit, offset);
 
   for (const d of deals) {
     d.pending_paise = d.deal_value_paise - d.paid_paise;
-    d.overdue = d.next_due_date && d.next_due_date < today;
+    d.overdue = d.overdue_paise > 0;
   }
 
+  // Whole-scope aggregates (settled deals included, as before) in one pass.
+  const agg = db.prepare(
+    `SELECT COUNT(*) AS n,
+            COALESCE(SUM(d.deal_value_paise), 0) AS total_value_paise,
+            COALESCE(SUM(COALESCE(pay.paid_paise, 0)), 0) AS collected_paise,
+            COALESCE(SUM(MAX(d.deal_value_paise - COALESCE(pay.paid_paise, 0), 0)), 0) AS pending_paise,
+            COALESCE(SUM(${OVERDUE_PAISE_SQL} > 0), 0) AS overdue_count,
+            COALESCE(SUM(MIN(${OVERDUE_PAISE_SQL}, MAX(d.deal_value_paise - COALESCE(pay.paid_paise, 0), 0))), 0) AS overdue_paise,
+            COALESCE(SUM(d.deal_value_paise - COALESCE(pay.paid_paise, 0) > 0), 0) AS open_count
+     ${COLLECTIONS_JOINS}
+     WHERE d.status != 'cancelled' ${callerScope}`
+  ).get(today, ...scopeParams);
+
   const summary = {
-    total_value_paise: deals.reduce((s, d) => s + d.deal_value_paise, 0),
-    collected_paise: deals.reduce((s, d) => s + d.paid_paise, 0),
-    pending_paise: deals.reduce((s, d) => s + (d.pending_paise > 0 ? d.pending_paise : 0), 0),
-    overdue_count: deals.filter((d) => d.overdue).length,
+    total_value_paise: agg.total_value_paise,
+    collected_paise: agg.collected_paise,
+    pending_paise: agg.pending_paise,
+    overdue_count: agg.overdue_count,
+    overdue_paise: agg.overdue_paise,
+    open_count: agg.open_count,
+    deal_count: agg.n,
   };
 
-  res.json({ deals, summary, today });
+  res.json({
+    deals,
+    summary,
+    today,
+    total: includeSettled ? agg.n : agg.open_count,
+    limit,
+    offset,
+    all: includeSettled,
+  });
 });
 
 export default router;

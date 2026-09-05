@@ -94,8 +94,79 @@ If it still won't connect, check each of these:
 - CallTrack may already be running (check the menu-bar/tray icon). Only one host
   instance runs at a time.
 - On the office Mac it also runs as a background service — the desktop app simply
-  attaches to it, so closing the window doesn't stop the server (use the tray menu
-  → **Quit** to fully stop it).
+  **attaches** to it, so closing the window doesn't stop the server. The tray/menu
+  Quit item says so ("closes this window; the background service keeps running");
+  stop the service itself with `npm run uninstall-autostart` if you really mean to.
+- **"Port 3000 is being used by another program"** — the app never moves to a
+  different port on its own (phones and the other computers have the address
+  stored). The dialog names the process holding the port; stop it and click
+  **Retry**, or use **Change setup…**.
+- **"The CallTrack background service is not responding"** — the service is
+  installed but did not answer within 60 s. In Terminal, inside the CallTrack
+  folder, run `npm run doctor`: it prints the launchd state, whether `/api/health`
+  answers, and the tail of `~/Library/Logs/CallTrack/calltrack.log` /
+  `calltrack-error.log`. Typical causes: the pinned Node binary was removed
+  (`nvm uninstall`) — re-run `npm run install-autostart`; the checkout lives under
+  `~/Desktop` / `~/Documents` and macOS privacy protection blocks the service —
+  move it to `~/CallTrack` or grant Files-and-Folders access.
+
+---
+
+## 📴 "Can't reach the main computer" screen
+
+The desktop app shows this (instead of the setup wizard) whenever the host does
+not answer. It retries every 5 seconds by itself and opens the app as soon as
+the host is back — leave it. **Retry now** forces a check; **Change setup…**
+re-opens the host/join chooser (the previous choice is kept until the new one
+works, and a computer that was "connected" must confirm before it can become
+the main computer).
+
+---
+
+## 🗂 Where are my files / logs?
+
+| What | Host (embedded server) | Office Mac with the background service |
+|---|---|---|
+| Database + backups | `Server → Open Data Folder` / `Open Backups Folder` (the app's data folder) | same menu items — they open the **service's** folders (`<checkout>/data`, `<checkout>/backups`) |
+| Desktop app log | `Server → Open App Log Folder` → `main.log` (rotated at 2 MB) | same |
+| Server log | `data/logs/server.log` | `data/logs/server.log` + `~/Library/Logs/CallTrack/` |
+
+Attach `main.log` and `server.log` to a bug report; both carry timestamps and
+the app version.
+
+---
+
+## 🔁 Restoring a backup fails
+
+The wizard's "I have a backup file" checks the file before using it:
+
+- **"not a SQLite database file"** — pick a `crm-YYYY-MM-DD.sqlite` from the old
+  computer's `Server → Open Backups Folder`, not a CSV export or a zip.
+- **"damaged (integrity check …)"** — that copy is corrupt; use an older backup.
+- **"no CallTrack users in it"** — a SQLite file, but not a CallTrack database.
+- Copied the live `crm.sqlite` while the old server was running? Copy the
+  `crm.sqlite-wal` file that sits next to it too — the wizard restores both.
+- If the first start after a restore fails, the app moves the file to
+  `crm.sqlite.bad-<timestamp>` inside the data folder and reopens the wizard
+  with the reason; nothing is deleted.
+
+---
+
+## 🔔 "Update available" in the menu
+
+Once a day the app compares its version with the main computer's server and
+with the latest GitHub release (nothing else leaves the machine; add
+`"updateCheck": false` to `config.json` in the app's data folder to switch it
+off). It only shows a link — download the new installer and run it; your data
+stays where it is.
+
+---
+
+## 🖨 Invoice / weekly report opens a blank or "Not logged in" page
+
+Fixed in 1.2.3: same-origin pages now open in a child window of the app that
+shares your login. If you still see it, you are on an older desktop build —
+update it.
 
 ---
 

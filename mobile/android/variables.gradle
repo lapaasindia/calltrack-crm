@@ -1,5 +1,6 @@
 ext {
-    minSdkVersion = 22
+    // Single minSdk for the app AND every Capacitor plugin module (MOB-25).
+    minSdkVersion = 26
     compileSdkVersion = 34
     targetSdkVersion = 34
     androidxActivityVersion = '1.8.0'

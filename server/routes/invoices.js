@@ -13,6 +13,8 @@ import { requireAdmin, canAccessLead } from '../middleware/auth.js';
 import { nowUtc, todayIst, addDays } from '../lib/istTime.js';
 import { logAudit } from '../lib/audit.js';
 import { isAdmin } from '../lib/permissions.js';
+// One money bound shared with deals/products/catalog: ₹100 crore (1e11 paise).
+import { MAX_PAISE } from './catalog.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -24,10 +26,10 @@ const TERMINAL_STATUSES = ['paid', 'cancelled'];
 // Negative is ALLOWED at the line level so a discount can be expressed as a
 // negative line (e.g. a billing-term discount from the price builder); the
 // computed subtotal is still guarded to be non-negative.
-// ±10 crore rupees per line — far above any real invoice line, and small
-// enough that summed totals stay well inside Number.MAX_SAFE_INTEGER paise so
-// integer math never silently loses precision (audit M-6).
-const MAX_LINE_PAISE = 100_00_00_000 * 100;
+// ±₹100 crore per line — far above any real invoice line, and small enough
+// that summed totals stay well inside Number.MAX_SAFE_INTEGER paise so integer
+// math never silently loses precision (audit M-6).
+const MAX_LINE_PAISE = MAX_PAISE;
 function toLinePaise(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
@@ -46,20 +48,28 @@ function resolveGstPercent(body) {
   return Number.isFinite(setting) && setting >= 0 ? Math.round(setting) : 18;
 }
 
-// Next 'INV-NNNNN' number from a sequence: highest existing numeric suffix + 1,
-// zero-padded to 5. Stable and unique (the column is UNIQUE); never random.
+// Next 'INV-NNNNN' number from the `counters` sequence (migration 017 seeds it
+// from the highest existing number), consumed INSIDE the caller's transaction
+// so two concurrent creates can never draw the same number and no MAX() scan
+// over every invoice runs per create (SCALE-23). If a number is somehow taken
+// (a hand-edited row), skip forward — the column is UNIQUE.
+const fmtInvoiceNumber = (n) => `INV-${String(n).padStart(5, '0')}`;
 function nextInvoiceNumber() {
-  const row = db.prepare(
-    `SELECT invoice_number FROM invoices
-     WHERE invoice_number LIKE 'INV-%'
-     ORDER BY CAST(SUBSTR(invoice_number, 5) AS INTEGER) DESC LIMIT 1`
-  ).get();
-  let next = 1;
-  if (row) {
-    const n = parseInt(String(row.invoice_number).slice(4), 10);
-    if (Number.isFinite(n)) next = n + 1;
+  const row = db.prepare("SELECT next FROM counters WHERE name = 'invoice'").get();
+  let next = row ? Number(row.next) : NaN;
+  if (!Number.isFinite(next) || next < 1) {
+    const legacy = db.prepare(
+      `SELECT COALESCE(MAX(CAST(SUBSTR(invoice_number, 5) AS INTEGER)), 0) AS n
+         FROM invoices WHERE invoice_number LIKE 'INV-%'`
+    ).get().n;
+    next = legacy + 1;
   }
-  return `INV-${String(next).padStart(5, '0')}`;
+  const taken = db.prepare('SELECT 1 FROM invoices WHERE invoice_number = ?');
+  while (taken.get(fmtInvoiceNumber(next))) next += 1;
+  db.prepare(
+    "INSERT INTO counters (name, next) VALUES ('invoice', ?) ON CONFLICT(name) DO UPDATE SET next = excluded.next"
+  ).run(next + 1);
+  return fmtInvoiceNumber(next);
 }
 
 function loadInvoiceItems(invoiceId) {
@@ -206,6 +216,10 @@ router.get('/', (req, res) => {
     where.push('i.status = ?');
     params.push(req.query.status);
   }
+  // Soft-cancelled (deleted) invoices stay out of the list unless an admin
+  // asks for them explicitly (?deleted=1) — the number stays in the sequence.
+  if (req.query.deleted === '1' && isAdmin(req.user.role)) where.push('i.deleted_at IS NOT NULL');
+  else where.push('i.deleted_at IS NULL');
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const rows = db.prepare(
     `SELECT i.*, l.name AS lead_name
@@ -221,7 +235,7 @@ router.get('/', (req, res) => {
 router.get('/:id', (req, res) => {
   const invoice = db.prepare(
     `SELECT i.*, l.name AS lead_name FROM invoices i
-     LEFT JOIN leads l ON l.id = i.lead_id WHERE i.id = ?`
+     LEFT JOIN leads l ON l.id = i.lead_id WHERE i.id = ? AND i.deleted_at IS NULL`
   ).get(req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   if (!canAccessInvoice(req.user, invoice)) return res.status(403).json({ error: 'Not allowed' });
@@ -230,7 +244,7 @@ router.get('/:id', (req, res) => {
 
 // ---------- PRINT-READY HTML (the real-PDF path) ----------
 router.get('/:id/html', (req, res) => {
-  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(req.params.id);
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ? AND deleted_at IS NULL').get(req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   if (!canAccessInvoice(req.user, invoice)) return res.status(403).json({ error: 'Not allowed' });
   const items = loadInvoiceItems(invoice.id);
@@ -240,7 +254,7 @@ router.get('/:id/html', (req, res) => {
 
 // ---------- STATUS / EDIT ----------
 router.patch('/:id', (req, res) => {
-  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(req.params.id);
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ? AND deleted_at IS NULL').get(req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   if (!canAccessInvoice(req.user, invoice)) return res.status(403).json({ error: 'Not allowed' });
   if (req.body.status === undefined) return res.status(400).json({ error: 'Nothing to update' });
@@ -268,17 +282,18 @@ router.patch('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- DELETE (admin tier) ----------
+// ---------- DELETE (admin tier) — soft-cancel (QA-4) ----------
+// A GST invoice number must never be reissued, so a delete keeps the row (and
+// its items) with status 'cancelled' + deleted_at. The row disappears from the
+// list/detail/HTML routes; the counters sequence is never rewound, so the next
+// invoice always gets a fresh number.
 router.delete('/:id', requireAdmin, (req, res) => {
-  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(req.params.id);
+  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ? AND deleted_at IS NULL').get(req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  db.transaction(() => {
-    db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(invoice.id);
-    db.prepare('DELETE FROM invoices WHERE id = ?').run(invoice.id);
-  })();
+  db.prepare("UPDATE invoices SET status = 'cancelled', deleted_at = ? WHERE id = ?").run(nowUtc(), invoice.id);
   logAudit({
     action: 'INVOICE_DELETED', user: req.user, entity_type: 'invoice', entity_id: invoice.id,
-    details: { invoice_number: invoice.invoice_number }, ip: req.ip,
+    details: { invoice_number: invoice.invoice_number, soft: true }, ip: req.ip,
   });
   res.json({ ok: true });
 });

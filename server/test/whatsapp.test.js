@@ -321,3 +321,61 @@ test('startWhatsApp is a no-op when whatsapp_enabled is false', async () => {
   assert.equal(r.started, false);
   assert.equal(r.reason, 'disabled');
 });
+
+// ---------------------------------------------------------------------------
+// SCALE-7: batch ingest (one transaction, one rescore per lead), raw_payload cap
+// ---------------------------------------------------------------------------
+
+test('ingestBatch: one transaction for a history-sync batch, calls mirror kept, score computed once', () => {
+  const phone = '9876598765';
+  const leadId = db.prepare(
+    `INSERT INTO leads (name, phone, phone_raw, source, stage, assigned_to, created_at, updated_at)
+     VALUES ('Batch Lead', ?, ?, 'manual', 'contacted', ?, ?, ?)`
+  ).run(phone, phone, callerId, new Date().toISOString(), new Date().toISOString()).lastInsertRowid;
+  const jid = `91${phone}@s.whatsapp.net`;
+  const batch = [];
+  for (let i = 0; i < 25; i += 1) {
+    batch.push(wa.extractMessage(fakeMsg({ id: `hist-${i}`, jid, text: `history ${i}`, ts: 1700000000 + i })));
+  }
+  batch.push(null); // tolerated
+  batch.push(wa.extractMessage(fakeMsg({ id: 'hist-0', jid, text: 'dup' }))); // duplicate id
+  const r = wa.ingestBatch(db, batch);
+  assert.equal(r.created, 25);
+  assert.equal(r.duplicates, 1);
+  assert.equal(r.leads_rescored, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM wa_messages WHERE lead_id = ?').get(leadId).n, 25);
+  // The lead timeline mirror (calls, source='whatsapp') is preserved — the client depends on it.
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM calls WHERE lead_id = ? AND source = 'whatsapp'").get(leadId).n, 25);
+  const lead = db.prepare('SELECT score, score_factors, last_contacted FROM leads WHERE id = ?').get(leadId);
+  assert.equal(typeof lead.score, 'number', 'score computed after the batch');
+  assert.ok(lead.last_contacted, 'last_contacted bumped');
+  // Idempotent: replaying the same batch creates nothing.
+  const again = wa.ingestBatch(db, batch.filter(Boolean));
+  assert.equal(again.created, 0);
+  assert.equal(again.duplicates, 26);
+  assert.equal(again.leads_rescored, 0);
+  assert.deepEqual(wa.ingestBatch(db, []), { created: 0, duplicates: 0, leads_rescored: 0 });
+});
+
+test('capRawPayload: known types capped at 4 KB (valid JSON summary), unknown types kept whole', () => {
+  const big = fakeMsg({ id: 'big-1', message: { imageMessage: { caption: 'x', jpegThumbnail: 'A'.repeat(20000) } } });
+  const capped = wa.capRawPayload(big, 'image');
+  assert.ok(capped.length <= wa.RAW_PAYLOAD_CAP, `capped to ${capped.length} bytes`);
+  const parsed = JSON.parse(capped);
+  assert.equal(parsed.truncated, true);
+  assert.ok(parsed.bytes > 20000);
+  assert.equal(parsed.key.id, 'big-1');
+  assert.deepEqual(parsed.message_keys, ['imageMessage']);
+  const small = fakeMsg({ id: 'small-1', text: 'hi' });
+  assert.equal(wa.capRawPayload(small, 'text'), JSON.stringify(small));
+  const unknown = fakeMsg({ id: 'unk-1', message: { weirdMessage: { blob: 'B'.repeat(20000) } } });
+  const kept = wa.capRawPayload(unknown, 'unknown');
+  assert.ok(kept.length > wa.RAW_PAYLOAD_CAP, 'unknown types keep the full envelope for diagnosis');
+  assert.equal(JSON.parse(kept).message.weirdMessage.blob.length, 20000);
+  assert.equal(wa.capRawPayload({ b: 1n, c: 'x'.repeat(5000) }, 'text').length <= wa.RAW_PAYLOAD_CAP, true, 'bigint-safe');
+});
+
+test('stopWhatsApp: closes a live socket without logging out, tolerates no runtime', async () => {
+  assert.equal(await wa.stopWhatsApp(), false, 'no runtime → nothing to stop');
+  wa._resetRuntimeForTests();
+});

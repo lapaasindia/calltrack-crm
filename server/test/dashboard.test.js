@@ -18,14 +18,20 @@ process.env.CRM_BACKUP_DIR = path.join(TMP, 'backups');
 const { ensureBootstrapped } = await import('../bootstrap.js');
 ensureBootstrapped();
 const db = (await import('../db.js')).default;
-const { todayIst, addDays, istRangeBounds } = await import('../lib/istTime.js');
+const { todayIst, addDays, istRangeBounds, istDayBounds } = await import('../lib/istTime.js');
 
 const now = new Date().toISOString();
-// An instant inside IST day 2026-06-16 (~12:00 IST = 06:30 UTC).
-const TODAY = '2026-06-16';
-const inRangeUtc = '2026-06-16T06:30:00.000Z';
-// An instant well before the default 30-day window (so range filters bite).
-const oldUtc = '2025-01-01T06:30:00.000Z';
+// Everything is anchored to the wall clock (audit SCALE-13): the dashboard's
+// default window is ROLLING (last 30 IST days / last 7), so hard-coded dates
+// silently fell out of range 30 days after they were written and the suite
+// turned red. TODAY is the current IST date; inRangeUtc is ~12:00 IST today.
+const TODAY = todayIst();
+const inRangeUtc = new Date(Date.parse(istDayBounds(TODAY).startUtc) + 6.5 * 3600e3).toISOString();
+// A business date + instant well before the default 30-day window (so range
+// filters bite).
+const OLD_DATE = addDays(TODAY, -60);
+const oldUtc = istDayBounds(OLD_DATE).startUtc;
+void oldUtc;
 
 function mkUser(username, role, isActive = 1) {
   return db.prepare(
@@ -89,7 +95,7 @@ function mkRecording(userId, callId, ai) {
 const leadA1 = mkLead(callerA);
 const dealA1 = mkDeal(leadA1, callerA, 10_000_000); // active → pipeline
 mkPayment(dealA1, callerA, 4_000_000); // revenue in range
-mkPayment(dealA1, callerA, 1_000_000, { receivedDate: '2025-01-01' }); // out of range
+mkPayment(dealA1, callerA, 1_000_000, { receivedDate: OLD_DATE }); // out of range
 
 const leadA2 = mkLead(callerA);
 mkDeal(leadA2, callerA, 9_999_999, { status: 'cancelled' }); // excluded from pipeline
@@ -181,8 +187,10 @@ test('admin dashboard: company-wide KPIs (pipeline from active deals, revenue fr
   assert.equal(r.status, 200);
   assert.equal(r.data.scope, 'team');
   const k = r.data.kpis;
-  // Pipeline = A's active ₹1,00,000 + B's active ₹2,00,000 (cancelled excluded).
-  assert.equal(k.pipelineValuePaise, 30_000_000);
+  // Pipeline = money still to collect on active deals (README: deal value −
+  // payments; SCALE-11): A ₹1,00,000 − ₹50,000 paid + B ₹2,00,000 − ₹50,000
+  // paid = ₹2,00,000 (cancelled deal excluded).
+  assert.equal(k.pipelineValuePaise, 20_000_000);
   // Revenue in range = A's ₹40,000 + B's ₹50,000 (out-of-range payment excluded).
   assert.equal(k.revenuePaise, 9_000_000);
   // Active projects = the one 'Working' project (Completed excluded).
@@ -216,8 +224,9 @@ test('caller scoping: a caller only sees their own leads/deals/payments', async 
   assert.equal(r.status, 200);
   assert.equal(r.data.scope, 'self');
   const k = r.data.kpis;
-  // Caller A's pipeline = only their active deal ₹1,00,000 (B's excluded).
-  assert.equal(k.pipelineValuePaise, 10_000_000);
+  // Caller A's pipeline = their active deal ₹1,00,000 minus the ₹50,000 already
+  // paid on it (B's excluded).
+  assert.equal(k.pipelineValuePaise, 5_000_000);
   // Caller A's revenue in range = only ₹40,000 (B's ₹50,000 excluded).
   assert.equal(k.revenuePaise, 4_000_000);
   // Caller A's calls = their 2 (B's call excluded).
@@ -295,6 +304,6 @@ test('date range filter: a narrow future range yields zero revenue', async () =>
   const r = await api('/api/dashboard?from=2030-01-01&to=2030-01-07', { cookie: adminCookie });
   assert.equal(r.status, 200);
   assert.equal(r.data.kpis.revenuePaise, 0);
-  // Pipeline (active deals) is range-independent, still present.
-  assert.equal(r.data.kpis.pipelineValuePaise, 30_000_000);
+  // Pipeline (active deals − payments) is range-independent, still present.
+  assert.equal(r.data.kpis.pipelineValuePaise, 20_000_000);
 });

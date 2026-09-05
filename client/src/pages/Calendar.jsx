@@ -4,28 +4,25 @@
 // Three overlay kinds: scheduled TASKS (blue) from /api/tasks (board_status not
 // Done/Drop, both scheduled_*_at set), TIME BLOCKS (amber) from
 // /api/time-blocks, and MEETINGS (green) from /api/meetings (not Cancelled).
-// Non-admins are scoped to their own by the server.
+// Non-admins are scoped to their own by the server. The visible range is sent
+// as from/to on every request (servers that ignore it just return more).
 //
 // Click an empty slot → quick-add a Task or a Time Block (prefilled to that
 // hour). Click an item → open it (task detail / edit the block / meeting detail).
 // Reloads on window focus. All IST date math via api.js helpers; instants are UTC.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, fmtDate, todayIstDate, IST_OFFSET_MS } from '../api.js';
-import { useApp } from '../App.jsx';
+import { api, fmtDate, todayIstDate, IST_OFFSET_MS, istDateOf } from '../api.js';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
 import { isAdmin } from '../permissions.js';
-import { Modal, TimeBlockDialog } from '../components.jsx';
+import { Modal, TimeBlockDialog, ErrorState, Field } from '../components.jsx';
 
 const HOURS = Array.from({ length: 24 }, (_, h) => h); // 0..23
 const DAY_START_HOUR = 6; // scroll the grid to a sensible working start
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 // ---- IST <-> instant helpers (no hand-rolled tz beyond the shared offset) ----
-
-// IST 'YYYY-MM-DD' of a UTC instant.
-function istDateOf(iso) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(iso));
-}
 // IST hour (0..23, fractional) of a UTC instant — for vertical placement.
 function istHourFloat(iso) {
   const shifted = new Date(Date.parse(iso) + IST_OFFSET_MS);
@@ -68,9 +65,9 @@ function hourLabel(h) {
 
 // Color per overlay kind: task=blue, time_block=amber, meeting=green.
 const EVENT_COLORS = {
-  task: { bg: 'var(--blue-soft)', fg: 'var(--blue)' },
-  time_block: { bg: 'var(--amber-soft)', fg: 'var(--amber)' },
-  meeting: { bg: 'var(--green-soft)', fg: 'var(--green)' },
+  task: { bg: 'var(--blue-soft)', fg: 'var(--blue-text)' },
+  time_block: { bg: 'var(--amber-soft)', fg: 'var(--amber-text)' },
+  meeting: { bg: 'var(--green-soft)', fg: 'var(--green-text)' },
 };
 function eventColor(kind) { return EVENT_COLORS[kind] || EVENT_COLORS.task; }
 function eventSub(ev) {
@@ -88,6 +85,7 @@ function EventChip({ ev, onClick }) {
   const c = eventColor(ev.kind);
   return (
     <button
+      type="button"
       onClick={(e) => { e.stopPropagation(); onClick(ev); }}
       title={ev.title}
       style={{
@@ -98,7 +96,7 @@ function EventChip({ ev, onClick }) {
         borderLeft: `3px solid ${c.fg}`,
         color: c.fg,
         borderRadius: 6, padding: '2px 5px', fontSize: 11, textAlign: 'left',
-        overflow: 'hidden', cursor: 'pointer', zIndex: 2,
+        overflow: 'hidden', cursor: 'pointer', zIndex: 2, fontFamily: 'inherit',
       }}>
       <b style={{ display: 'block', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
         {ev.title}
@@ -109,14 +107,11 @@ function EventChip({ ev, onClick }) {
 }
 
 export default function Calendar() {
-  const { user, showToast } = useApp();
+  const { user, canWrite } = useApp();
   const navigate = useNavigate();
   const admin = isAdmin(user.role);
   const [view, setView] = useState('week'); // 'day' | 'week' | 'month'
   const [anchor, setAnchor] = useState(todayIstDate()); // IST date string in view
-  const [tasks, setTasks] = useState([]);
-  const [blocks, setBlocks] = useState([]);
-  const [meetings, setMeetings] = useState([]);
   const [quickAdd, setQuickAdd] = useState(null); // {date,hour}
   const [blockDialog, setBlockDialog] = useState(null); // {block?|prefill}
 
@@ -128,21 +123,21 @@ export default function Calendar() {
 
   const range = useMemo(() => ({ from: days[0], to: days[days.length - 1] }), [days]);
 
-  const load = useCallback(() => {
-    const q = `?status=all`;
-    api.get(`/api/tasks${q}`)
-      .then((rows) => setTasks(rows.filter((t) => t.scheduled_start_at && t.scheduled_end_at
-        && t.board_status !== 'Done' && t.board_status !== 'Drop')))
-      .catch((e) => showToast(e.message, 'error'));
-    api.get(`/api/time-blocks?from=${range.from}&to=${range.to}`)
-      .then(setBlocks)
-      .catch((e) => showToast(e.message, 'error'));
-    api.get('/api/meetings')
-      .then((rows) => setMeetings(rows.filter((m) => m.status !== 'Cancelled')))
-      .catch((e) => showToast(e.message, 'error'));
-  }, [range.from, range.to, showToast]);
+  const { data, error, reload: load } = useRequest(async ({ signal }) => {
+    const q = `from=${range.from}&to=${range.to}`;
+    const [tasks, blocks, meetings] = await Promise.all([
+      api.get(`/api/tasks?status=all&${q}`, { signal }),
+      api.get(`/api/time-blocks?${q}`, { signal }),
+      api.get(`/api/meetings?${q}`, { signal }),
+    ]);
+    return {
+      tasks: tasks.filter((t) => t.scheduled_start_at && t.scheduled_end_at
+        && t.board_status !== 'Done' && t.board_status !== 'Drop'),
+      blocks,
+      meetings: meetings.filter((m) => m.status !== 'Cancelled'),
+    };
+  }, [range.from, range.to]);
 
-  useEffect(() => { load(); }, [load]);
   useEffect(() => {
     const onFocus = () => load();
     window.addEventListener('focus', onFocus);
@@ -152,22 +147,23 @@ export default function Calendar() {
   // Index events by IST day.
   const eventsByDay = useMemo(() => {
     const map = {};
+    if (!data) return map;
     const push = (day, ev) => { (map[day] = map[day] || []).push(ev); };
-    for (const t of tasks) {
+    for (const t of data.tasks) {
       push(istDateOf(t.scheduled_start_at), {
         kind: 'task', id: t.id, title: t.title,
         start_at: t.scheduled_start_at, end_at: t.scheduled_end_at,
       });
     }
-    for (const b of blocks) push(b.block_date, { kind: 'time_block', ...b });
-    for (const m of meetings) {
+    for (const b of data.blocks) push(b.block_date, { kind: 'time_block', ...b });
+    for (const m of data.meetings) {
       push(istDateOf(m.start_at), {
         kind: 'meeting', id: m.id, title: m.title,
         start_at: m.start_at, end_at: m.end_at, status: m.status,
       });
     }
     return map;
-  }, [tasks, blocks, meetings]);
+  }, [data]);
 
   const step = (dir) => {
     if (view === 'day') setAnchor((d) => addDaysStr(d, dir));
@@ -185,7 +181,7 @@ export default function Calendar() {
     else setBlockDialog({ block: ev });
   };
 
-  const onSlotClick = (date, hour) => setQuickAdd({ date, hour });
+  const onSlotClick = (date, hour) => { if (canWrite) setQuickAdd({ date, hour }); };
 
   const title = view === 'month'
     ? new Date(`${anchor}T00:00:00Z`).toLocaleDateString('en-IN', { timeZone: 'UTC', month: 'long', year: 'numeric' })
@@ -197,20 +193,22 @@ export default function Calendar() {
       <div className="page-title">
         <h1>Calendar</h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div className="seg">
+          <div className="seg" role="group" aria-label="View">
             {['day', 'week', 'month'].map((v) => (
-              <button key={v} type="button" className={view === v ? 'on' : ''}
+              <button key={v} type="button" className={view === v ? 'on' : ''} aria-pressed={view === v}
                 onClick={() => setView(v)}>{v[0].toUpperCase() + v.slice(1)}</button>
             ))}
           </div>
-          <button className="btn small secondary" onClick={() => step(-1)} title="Previous">‹</button>
-          <button className="btn small secondary" onClick={() => setAnchor(todayIstDate())}>Today</button>
-          <button className="btn small secondary" onClick={() => step(1)} title="Next">›</button>
+          <button type="button" className="btn small secondary" onClick={() => step(-1)} title="Previous" aria-label="Previous">‹</button>
+          <button type="button" className="btn small secondary" onClick={() => setAnchor(todayIstDate())}>Today</button>
+          <button type="button" className="btn small secondary" onClick={() => step(1)} title="Next" aria-label="Next">›</button>
         </div>
       </div>
 
+      {error && <ErrorState error={error} onRetry={load} compact />}
+
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
           <b style={{ fontSize: 15 }}>{title}</b>
           <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-soft)' }}>
             <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 3, background: 'var(--blue)', marginRight: 4 }} />Tasks</span>
@@ -250,7 +248,7 @@ export default function Calendar() {
 // ---- the hour grid (day + week) ----
 function HourGrid({ days, eventsByDay, today, onSlot, onEvent }) {
   // Scroll the (vertically-scrollable) grid to the working start once on mount.
-  const scrollRef = React.useRef(null);
+  const scrollRef = useRef(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = DAY_START_HOUR * 48;
   }, []);
@@ -285,6 +283,7 @@ function HourGrid({ days, eventsByDay, today, onSlot, onEvent }) {
             {HOURS.map((h) => (
               <div key={h}
                 onClick={() => onSlot(d, h)}
+                title={`Add at ${hourLabel(h)}`}
                 style={{ height: 48, borderBottom: '1px solid var(--line)', cursor: 'pointer' }} />
             ))}
             {(eventsByDay[d] || []).map((ev) => (
@@ -312,22 +311,22 @@ function MonthGrid({ days, anchor, eventsByDay, today, onDayClick, onEvent }) {
           <div key={d} onClick={() => onDayClick(d)}
             style={{
               background: 'var(--surface)', minHeight: 88, padding: 5, cursor: 'pointer',
-              opacity: inMonth ? 1 : 0.45,
+              opacity: inMonth ? 1 : 0.55,
             }}>
-            <div style={{
-              fontSize: 12, fontWeight: 700, marginBottom: 3,
-              color: d === today ? 'var(--brand)' : 'var(--ink)',
-            }}>{Number(d.slice(8))}</div>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDayClick(d); }} aria-label={`Open ${fmtDate(d)}`} style={{
+              fontSize: 12, fontWeight: 700, marginBottom: 3, background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+              color: d === today ? 'var(--brand)' : 'var(--ink)', fontFamily: 'inherit',
+            }}>{Number(d.slice(8))}</button>
             {evs.slice(0, 3).map((ev) => {
               const c = eventColor(ev.kind);
               return (
-                <button key={`${ev.kind}-${ev.id}`}
+                <button key={`${ev.kind}-${ev.id}`} type="button"
                   onClick={(e) => { e.stopPropagation(); onEvent(ev); }}
                   title={ev.title}
                   style={{
                     display: 'block', width: '100%', textAlign: 'left', marginBottom: 2,
                     fontSize: 10.5, padding: '1px 4px', borderRadius: 4, border: 'none',
-                    background: c.bg, color: c.fg,
+                    background: c.bg, color: c.fg, fontFamily: 'inherit',
                     whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', cursor: 'pointer',
                   }}>{ev.title}</button>
               );
@@ -348,7 +347,7 @@ function QuickAddDialog({ slot, onClose, onPickBlock, onSaved }) {
   const startIso = istToUtcIso(slot.date, slot.hour);
   const endIso = istToUtcIso(slot.date, slot.hour + 1);
 
-  const addTask = async () => {
+  const [addTask, saving] = useSubmit(async () => {
     if (!title.trim()) return;
     try {
       const created = await api.post('/api/tasks', { title: title.trim(), due_date: slot.date });
@@ -358,16 +357,16 @@ function QuickAddDialog({ slot, onClose, onPickBlock, onSaved }) {
       showToast('Task scheduled ✓');
       onSaved();
     } catch (err) { showToast(err.message, 'error'); }
-  };
+  });
 
   return (
     <Modal title={`Add at ${fmtDate(slot.date)}, ${hourLabel(slot.hour)}`} onClose={onClose}>
       {!mode && (
         <div className="row-list">
-          <button className="lead-row" style={{ width: '100%', textAlign: 'left' }} onClick={() => setMode('task')}>
+          <button type="button" className="lead-row clickable" style={{ width: '100%' }} onClick={() => setMode('task')}>
             <div className="info"><div className="name">📋 Task</div><div className="meta">A scheduled to-do (blue)</div></div>
           </button>
-          <button className="lead-row" style={{ width: '100%', textAlign: 'left' }}
+          <button type="button" className="lead-row clickable" style={{ width: '100%' }}
             onClick={() => onPickBlock({ start_at: startIso, end_at: endIso, block_date: slot.date })}>
             <div className="info"><div className="name">🟧 Time block</div><div className="meta">Reserve focus time (amber)</div></div>
           </button>
@@ -375,14 +374,13 @@ function QuickAddDialog({ slot, onClose, onPickBlock, onSaved }) {
       )}
       {mode === 'task' && (
         <>
-          <div className="field">
-            <label>Task title</label>
+          <Field label="Task title">
             <input value={title} autoFocus onChange={(e) => setTitle(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && addTask()} placeholder="What needs doing?" />
-          </div>
+          </Field>
           <div className="modal-actions">
-            <button className="btn secondary" onClick={onClose}>Cancel</button>
-            <button className="btn" disabled={!title.trim()} onClick={addTask}>Schedule task</button>
+            <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn" disabled={!title.trim() || saving} onClick={addTask}>{saving ? 'Scheduling…' : 'Schedule task'}</button>
           </div>
         </>
       )}

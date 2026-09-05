@@ -44,45 +44,46 @@ function parseExtra(lead) {
   }
 }
 
-// Days between the most recent call and `now`. null when there are no calls.
-function daysSinceLastCall(calls, now) {
-  let latest = null;
-  for (const c of calls || []) {
-    const t = Date.parse(c.called_at);
-    if (!Number.isNaN(t) && (latest === null || t > latest)) latest = t;
-  }
-  if (latest === null) return null;
-  return Math.max(0, (Date.parse(now) - latest) / 86400000);
+// Days between an instant and `now`. null when there is no instant.
+function daysSince(instant, now) {
+  if (!instant) return null;
+  const t = instant instanceof Date ? instant.getTime() : Date.parse(instant);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, (Date.parse(now) - t) / 86400000);
 }
 
-// Core scorer. PURE: returns {score, factors}. `now` is injectable for tests.
-export function calculateLeadScore(lead, calls = [], now = nowUtc()) {
+// Core scorer over pre-aggregated engagement signals — PURE. `signals` is
+// { connected, attempts, last_connected_at } (connected/attempts = phone calls
+// that did / did not connect; last_connected_at = most recent CONNECTED
+// contact of any source, incl. WhatsApp mirror rows) or null when the lead has
+// no calls at all. The nightly recompute feeds this straight from one GROUP BY
+// over calls; calculateLeadScore() derives the same signals from a calls array.
+export function calculateLeadScoreFromSignals(lead, signals, now = nowUtc()) {
   const factors = {};
 
   // 1) Source weight (0..20).
   const source = String(lead?.source || 'manual').toLowerCase();
   factors.source = SOURCE_WEIGHTS[source] ?? SOURCE_DEFAULT;
 
-  // 2) Call engagement (0..35). Connected conversations weigh most; mere
-  //    attempts (not_picked/busy/etc.) earn a little. Capped so a dialer
-  //    spamming a dead number can't run the score up. WhatsApp mirror rows
-  //    (source='whatsapp') are excluded: they're messaging activity, not phone
-  //    engagement, and outbound mirrors are hard-coded disposition='connected'
-  //    so counting them would let a burst of outbound texts inflate the score.
-  let connected = 0;
-  let attempts = 0;
-  for (const c of calls) {
-    if (c.source === 'whatsapp') continue;
-    if (c.disposition === 'connected') connected += 1;
-    else attempts += 1;
-  }
-  factors.engagement = clamp(connected * 10 + attempts * 2, 0, 35);
+  // 2) Call engagement (0..35). ONLY connected conversations earn credit
+  //    (QA-11): a not_picked / busy / switched_off / wrong_number dial is not
+  //    engagement, and a dialer redialling a dead number must never warm it
+  //    up. Capped so even many connects saturate. WhatsApp mirror rows
+  //    (source='whatsapp') are excluded by the caller: they're messaging
+  //    activity, not phone engagement, and outbound mirrors are hard-coded
+  //    disposition='connected' so counting them would let a burst of outbound
+  //    texts inflate the score.
+  const connected = Math.max(0, Number(signals?.connected) || 0);
+  const attempts = Math.max(0, Number(signals?.attempts) || 0);
+  factors.engagement = clamp(connected * 10, 0, 35);
   factors.connected_calls = connected;
   factors.total_calls = connected + attempts;
 
-  // 3) Recency decay (-20..+15). A recent conversation is a strong buy signal;
-  //    a lead untouched for weeks goes cold. No calls at all = neutral 0.
-  const days = daysSinceLastCall(calls, now);
+  // 3) Recency decay (-20..+15) of the last CONNECTED contact. A recent
+  //    conversation is a strong buy signal; one untouched for weeks goes cold.
+  //    Never connected (or no calls at all) = neutral 0 — failed attempts
+  //    neither warm nor cool a lead.
+  const days = signals ? daysSince(signals.last_connected_at, now) : null;
   if (days === null) {
     factors.recency = 0;
   } else if (days <= 1) factors.recency = 15;
@@ -122,6 +123,29 @@ export function calculateLeadScore(lead, calls = [], now = nowUtc()) {
 
   const score = clamp(Math.round(raw), 0, 100);
   return { score, factors };
+}
+
+// Core scorer over a calls array. PURE: returns {score, factors}. `now` is
+// injectable for tests. Recency looks at the most recent CONNECTED row of any
+// source; engagement counts phone calls only (WhatsApp mirror rows skipped).
+export function calculateLeadScore(lead, calls = [], now = nowUtc()) {
+  let connected = 0;
+  let attempts = 0;
+  let latest = null;
+  for (const c of calls || []) {
+    const isConnected = c.disposition === 'connected';
+    if (isConnected) {
+      const t = Date.parse(c.called_at);
+      if (!Number.isNaN(t) && (latest === null || t > latest)) latest = t;
+    }
+    if (c.source === 'whatsapp') continue;
+    if (isConnected) connected += 1;
+    else attempts += 1;
+  }
+  const signals = (calls && calls.length)
+    ? { connected, attempts, last_connected_at: latest === null ? null : new Date(latest).toISOString() }
+    : null;
+  return calculateLeadScoreFromSignals(lead, signals, now);
 }
 
 // Hot / Warm / Cold label for a score. Hot>=80, Warm>=50, Cold<50.

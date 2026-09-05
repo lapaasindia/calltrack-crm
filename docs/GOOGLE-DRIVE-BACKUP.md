@@ -52,12 +52,13 @@ In **Settings → ☁️ Cloud Backup (Google Drive)** (owner/admin only):
 2. Click **Connect Google Drive**. A Google tab opens — choose your account, click through the
    "Google hasn't verified this app" / unverified warning (*Advanced → Go to CallTrack Backup*,
    this is your own app), and **Allow**. The tab confirms "connected" and closes.
-3. **Set a backup passphrase** (min 8 chars). Read the warning. Write it down.
+3. **Set a backup passphrase** (at least 12 characters; obvious ones are rejected). Read the warning. Write it down.
 4. Click **Back up now** to run the first upload immediately.
 
 After that, the backup runs automatically (piggybacking the existing 30-minute backup tick): once
 per day, after the local snapshot, if Drive is connected and today's cloud sync isn't done yet.
-Offline / no internet = it skips quietly and retries on the next tick.
+Offline / no internet = it skips quietly and retries on the next tick. Files are encrypted and
+uploaded as streams, so the server keeps answering requests while a backup runs.
 
 ### Unattended daily runs
 
@@ -72,13 +73,13 @@ restart, the scheduler needs it again before it can run unattended. Either:
 ## What gets backed up
 
 **Included**
-- The latest consistent **database snapshot** (`backups/crm-<date>.sqlite`, produced by `VACUUM INTO`).
+- The latest consistent **database snapshot** (`backups/crm-<date>.sqlite`, taken with SQLite's online backup API and verified with `quick_check` before it gets that name).
 - `data/recordings/**` (all call recordings, content-addressed → uploaded once each).
 - `data/invoices/**` and any other data files (exports, etc.).
 
 **Excluded**
 - The live `crm.sqlite` + its `-wal`/`-shm` sidecars (a naive copy of a live WAL DB can tear — that's
-  why we upload the VACUUM snapshot instead).
+  why we upload the verified snapshot instead).
 - `sessions.sqlite*` (login sessions — not business data).
 - `secret.key`, `*.log`, `data/apk/` (build artifact), scratch `tmp/` folders.
 

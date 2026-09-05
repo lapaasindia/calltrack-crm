@@ -6,69 +6,103 @@
   "type": "module",
   "main": "desktop/main.js",
   "engines": {
-    "node": "22.x"
+    "node": ">=22.12 <25"
   },
   "scripts": {
     "start": "node server/index.js",
     "seed": "node server/seed.js",
     "restore-cloud": "node scripts/restore-cloud.js",
-    "test": "CRM_ADMIN_PASSWORD=admin123 node --test server/test/*.test.js desktop/lib/*.test.js",
+    "test": "CRM_ADMIN_PASSWORD=admin123 node --test server/test/*.test.js desktop/lib/*.test.js scripts/*.test.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
     "build": "npm --prefix client run build",
     "setup": "npm install && npm --prefix client install && npm --prefix client run build && node server/seed.js",
     "install-autostart": "node scripts/install-autostart.js",
+    "uninstall-autostart": "node scripts/uninstall-autostart.js",
+    "doctor": "node scripts/doctor.js",
     "app": "electron .",
-    "app:rebuild": "electron-rebuild -f -w better-sqlite3 && codesign --force --sign - node_modules/better-sqlite3/build/Release/better_sqlite3.node",
     "icons": "electron desktop/make-icon.js",
-    "dist:mac": "npm run build && electron-builder --mac && npm rebuild better-sqlite3",
-    "dist:win": "npm run build && node scripts/fetch-win-sqlite.js && electron-builder --win -c.npmRebuild=false && npm rebuild better-sqlite3",
-    "dist": "npm run build && electron-builder --mac && node scripts/fetch-win-sqlite.js && electron-builder --win -c.npmRebuild=false && npm rebuild better-sqlite3"
+    "native": "node scripts/fetch-electron-sqlite.js",
+    "native:verify": "node scripts/fetch-electron-sqlite.js --verify",
+    "dist:mac": "npm run build && npm run native && electron-builder --mac",
+    "dist:win": "npm run build && npm run native && electron-builder --win",
+    "dist": "npm run build && npm run native && electron-builder --mac --win"
   },
   "dependencies": {
-    "@capacitor-mlkit/barcode-scanning": "^6.2.0",
-    "@capacitor/android": "^6.2.1",
-    "@capacitor/core": "^6.2.1",
-    "@capacitor/local-notifications": "^6.1.3",
-    "@capacitor/preferences": "^6.0.4",
-    "baileys": "^6.7.23",
+    "baileys": "~6.7.24",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^13.0.3",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
-    "multer": "^2.1.1",
+    "multer": "^2.3.0",
     "pino": "^9.14.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
+    "@capacitor-mlkit/barcode-scanning": "^6.2.0",
+    "@capacitor/android": "^6.2.1",
     "@capacitor/cli": "^6.2.1",
-    "electron": "^36.9.5",
-    "electron-builder": "^25.1.8"
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/local-notifications": "^6.1.3",
+    "@capacitor/preferences": "^6.0.4",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3"
   },
   "overrides": {
-    "form-data": ">=4.0.6"
+    "form-data": ">=4.0.6",
+    "qs": "^6.16.0"
   },
   "build": {
     "appId": "com.calltrack.crm",
     "productName": "CallTrack CRM",
     "afterPack": "scripts/afterpack-sign.cjs",
+    "npmRebuild": false,
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
     "files": [
-      "desktop/**/*",
-      "!desktop/make-icon.js",
+      "desktop/main.js",
+      "desktop/preload.cjs",
+      "desktop/setup.html",
+      "desktop/setup.js",
+      "desktop/offline.html",
+      "desktop/offline.js",
+      "desktop/tray.png",
+      "desktop/lib/*.js",
       "!desktop/lib/*.test.js",
       "server/**/*",
       "!server/test/**",
+      "!server/seed.js",
       "client/dist/**/*",
-      "scripts/**/*",
-      "!scripts/desktop-smoke.mjs"
+      "package.json",
+      "!node_modules/better-sqlite3/prebuilds/linux*",
+      "!node_modules/better-sqlite3/prebuilds/win32-arm64.node",
+      "!node_modules/better-sqlite3/{src,deps,binding.gyp}",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "build/native",
+        "to": "native",
+        "filter": [
+          "**/*.node",
+          "native.lock.json"
+        ]
+      }
     ],
     "asarUnpack": [
       "**/*.node"
     ],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "resetAdHocDarwinSignature": true
+    },
     "mac": {
       "category": "public.app-category.business",
       "artifactName": "CallTrack-CRM-${version}-mac-${arch}.${ext}",

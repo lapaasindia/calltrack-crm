@@ -13,6 +13,7 @@
 //   4. POST /run-now triggers an immediate encrypted upload.
 import { Router } from 'express';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { getSetting, setSetting } from '../db.js';
 import { requireOwner } from '../middleware/auth.js';
 import { logAudit } from '../lib/audit.js';
@@ -32,13 +33,39 @@ const router = Router();
 router.use(requireOwner);
 
 // The loopback redirect URI. Google's "Desktop" client accepts http on the
-// machine's own host, so we reflect the request host (LAN IP / localhost) +
-// the callback path. Must be added as an Authorized redirect URI in the Google
-// Cloud console for the OAuth client.
+// machine's own host, so the redirect is built from the request host — but
+// only after checking it is genuinely one of OUR addresses (localhost, a LAN
+// IP of this machine, a *.local name, or CRM_OAUTH_REDIRECT_HOST). A spoofed
+// Host header must never steer the OAuth redirect_uri (audit SEC-12). Must be
+// added as an Authorized redirect URI in the Google Cloud console.
+function lanIps() {
+  const ips = [];
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces || []) {
+      if (iface.family === 'IPv4' && !iface.internal) ips.push(iface.address);
+    }
+  }
+  return ips;
+}
+export function isOwnHost(hostHeader) {
+  const host = String(hostHeader || '').trim().toLowerCase();
+  const m = host.match(/^(\[[0-9a-f:.]+\]|[^:/?#\s]+)(?::(\d{1,5}))?$/);
+  if (!m) return false;
+  const name = m[1];
+  if (name === 'localhost' || name === '127.0.0.1' || name === '[::1]') return true;
+  if (/^[a-z0-9-]+\.local$/.test(name)) return true;
+  const configured = String(process.env.CRM_OAUTH_REDIRECT_HOST || '').trim().toLowerCase();
+  if (configured && (name === configured || host === configured)) return true;
+  return lanIps().includes(name);
+}
 function redirectUri(req) {
-  const proto = req.protocol;
   const host = req.get('host');
-  return `${proto}://${host}/api/backup/google/callback`;
+  if (!isOwnHost(host)) {
+    const err = new Error('Unrecognised Host header — open the CRM via localhost, its LAN IP or its .local name to connect Google Drive');
+    err.status = 400;
+    throw err;
+  }
+  return `${req.protocol}://${host}/api/backup/google/callback`;
 }
 
 // GET /api/backup/status — never echoes secrets, only booleans + last-sync.
@@ -78,11 +105,16 @@ router.post('/google/connect', (req, res) => {
   }
   // Random per-flow state, parked in the session, checked on callback. Closes
   // the OAuth-CSRF gap where a forged GET could bind us to an attacker's Drive.
+  let redirect;
+  try { redirect = redirectUri(req); } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    throw err;
+  }
   const state = crypto.randomBytes(16).toString('hex');
   req.session.driveOauthState = state;
   const url = buildAuthUrl({
     clientId: cfg.client_id,
-    redirectUri: redirectUri(req),
+    redirectUri: redirect,
     state,
   });
   res.json({ url });

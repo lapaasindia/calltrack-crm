@@ -109,18 +109,34 @@ function hydrate(meeting) {
 
 // ===================== MEETINGS CRUD =====================
 
-// LIST — scoped. Optional ?status= / ?owner_id= filters.
+// LIST — scoped. Optional ?status= / ?owner_id= filters, ?limit (default
+// 1000, max 5000). Visibility is applied IN SQL before the LIMIT (SCALE-5):
+// the old "newest 1000 company-wide, then filter in JS" silently dropped a
+// caller's own older meetings once the company passed 1000 meetings.
 router.get('/', (req, res) => {
-  const rows = db.prepare('SELECT * FROM meetings ORDER BY start_at DESC, id DESC LIMIT 1000').all();
-  let visible = rows.filter((m) => canSee(req.user, m));
+  const where = [];
+  const params = [];
+  if (!isAdmin(req.user.role)) {
+    // owner, or listed in the attendee_ids JSON array. CASE guards json_each
+    // against a malformed value (it would otherwise abort the whole query).
+    where.push(`(m.owner_id = ? OR CASE WHEN json_valid(m.attendee_ids)
+      THEN EXISTS (SELECT 1 FROM json_each(m.attendee_ids) je WHERE je.value = ?) ELSE 0 END)`);
+    params.push(req.user.id, req.user.id);
+  }
   if (req.query.status && STATUSES.includes(req.query.status)) {
-    visible = visible.filter((m) => m.status === req.query.status);
+    where.push('m.status = ?');
+    params.push(req.query.status);
   }
   if (req.query.owner_id) {
-    const oid = Number(req.query.owner_id);
-    visible = visible.filter((m) => m.owner_id === oid);
+    where.push('m.owner_id = ?');
+    params.push(Number(req.query.owner_id));
   }
-  res.json(visible.map(hydrate));
+  const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit, 10) || 1000));
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db.prepare(
+    `SELECT m.* FROM meetings m ${whereSql} ORDER BY m.start_at DESC, m.id DESC LIMIT ?`
+  ).all(...params, limit);
+  res.json(rows.map(hydrate));
 });
 
 // GET one (with agenda, roles, decisions, actions, timer sessions).

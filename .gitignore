@@ -19,3 +19,18 @@ mobile/android/.idea/
 mobile/android/app/release/
 *.keystore
 *.apk
+
+# Signing material and local secrets — never commit these (audit DEP-16)
+*.jks
+*.p12
+*.pem
+.env
+.env.*
+!.env.example
+mobile/android/app/google-services.json
+
+# Local IDE / agent session config (absolute machine paths)
+.claude/
+
+# Electron native prebuilds fetched by scripts/fetch-electron-sqlite.js (the SHA-256 lock file stays tracked)
+build/native/**/*.node

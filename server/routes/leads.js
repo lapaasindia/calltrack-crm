@@ -1,14 +1,36 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { requireAdmin, loadLead } from '../middleware/auth.js';
+import { requireAdmin, requireWriter, loadLead } from '../middleware/auth.js';
 import { normalizePhone } from '../lib/phone.js';
 import { nowUtc } from '../lib/istTime.js';
 import { STAGES, changeStage } from '../lib/leadStage.js';
 import { recalcLeadScore } from '../lib/scoring.js';
 import { isAdmin, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
-import { getAutoAssignedOwner } from '../lib/assignment.js';
+import { getAutoAssignedOwner, assignRoundRobin } from '../lib/assignment.js';
 
 const router = Router();
+// read_only can browse; every write below is refused up front.
+router.use(requireWriter);
+
+// Page size: default 50, `?limit=` up to 500 (pickers and the Kanban ask for
+// more than a page — CLIENT-7). Echoed back as page_size.
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
+function pageSizeOf(q) {
+  const n = parseInt(q.limit, 10);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(MAX_PAGE_SIZE, n);
+}
+
+// Reassignment moves the lead's OPEN work with it — the pending follow-up and
+// pending tasks — so nothing rots in the old owner's queue (SCALE-20).
+const moveOpenWork = (newAssignee, leadId) => {
+  if (!newAssignee) return;
+  db.prepare("UPDATE follow_ups SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
+    .run(newAssignee, leadId);
+  db.prepare("UPDATE tasks SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
+    .run(newAssignee, leadId);
+};
 
 // Tolerant JSON parse for stored TEXT(json) columns — a malformed blob must
 // never 500 the lead page.
@@ -67,7 +89,7 @@ router.get('/', (req, res) => {
   }
 
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const pageSize = 50;
+  const pageSize = pageSizeOf(req.query);
   const total = db.prepare(
     `SELECT COUNT(*) AS n FROM leads l WHERE ${where.join(' AND ')}`
   ).get(...params).n;
@@ -100,7 +122,7 @@ router.get('/check-phone', (req, res) => {
     'SELECT id, name, stage, assigned_to FROM leads WHERE phone = ? AND deleted_at IS NULL'
   ).get(norm.phone);
   if (!existing) return res.json({ valid: true, phone: norm.phone, duplicate: null });
-  const mine = req.user.role === 'admin' || existing.assigned_to === req.user.id;
+  const mine = canSeeAllLeads(req.user.role) || existing.assigned_to === req.user.id;
   res.json({
     valid: true,
     phone: norm.phone,
@@ -120,7 +142,7 @@ router.post('/', (req, res) => {
     'SELECT id, name, assigned_to FROM leads WHERE phone = ? AND deleted_at IS NULL'
   ).get(norm.phone);
   if (existing) {
-    const mine = req.user.role === 'admin' || existing.assigned_to === req.user.id;
+    const mine = canSeeAllLeads(req.user.role) || existing.assigned_to === req.user.id;
     return res.status(409).json({
       error: mine
         ? 'A lead with this phone already exists'
@@ -156,6 +178,9 @@ router.post('/', (req, res) => {
     String(req.body.source || 'manual').trim() || 'manual',
     assignedTo, req.body.notes || null, now, now
   );
+  // Initial score (source/stage factors) so a fresh lead is never NULL-scored
+  // until its first event (SCALE-10).
+  recalcLeadScore(db, info.lastInsertRowid);
   res.json({
     id: info.lastInsertRowid,
     assigned_to: assignedTo,
@@ -229,8 +254,10 @@ router.patch('/:id', loadLead, (req, res) => {
       return res.status(400).json({ error: 'Use the Win Deal flow to mark a lead won' });
     }
   }
-  if (req.body.assigned_to !== undefined && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Only admin can reassign leads' });
+  // Reassignment is admin-tier (super_admin/admin/manager) — the same tier
+  // that may assign on create (SCALE-9 / CLIENT-8).
+  if (req.body.assigned_to !== undefined && !isAdmin(req.user.role)) {
+    return res.status(403).json({ error: 'Only admin-tier users can reassign leads' });
   }
   let normPhone = null;
   if (req.body.phone !== undefined) {
@@ -264,11 +291,7 @@ router.patch('/:id', loadLead, (req, res) => {
         const newAssignee = req.body.assigned_to ? Number(req.body.assigned_to) : null;
         db.prepare('UPDATE leads SET assigned_to = ?, updated_at = ? WHERE id = ?')
           .run(newAssignee, nowUtc(), lead.id);
-        // Pending follow-up moves with the lead so it doesn't rot in the old caller's queue.
-        if (newAssignee) {
-          db.prepare("UPDATE follow_ups SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'")
-            .run(newAssignee, lead.id);
-        }
+        moveOpenWork(newAssignee, lead.id);
       }
       const fields = ['name', 'alt_phone', 'email', 'city', 'source', 'notes'];
       for (const f of fields) {
@@ -309,6 +332,9 @@ router.delete('/:id', requireAdmin, (req, res) => {
       .run(nowUtc(), nowUtc(), lead.id);
     db.prepare("UPDATE follow_ups SET status = 'cancelled' WHERE lead_id = ? AND status = 'pending'")
       .run(lead.id);
+    // Unlink WhatsApp chats so the contact can be promoted to a fresh lead
+    // later and inbound messages stop mirroring into a deleted lead (SCALE-19).
+    db.prepare('UPDATE wa_contacts SET lead_id = NULL WHERE lead_id = ?').run(lead.id);
   })();
   res.json({ ok: true });
 });
@@ -320,24 +346,22 @@ router.post('/bulk-assign', requireAdmin, (req, res) => {
 
   let assignees;
   if (req.body.round_robin) {
-    assignees = db.prepare(
-      "SELECT id FROM users WHERE role = 'caller' AND is_active = 1 ORDER BY id"
-    ).all().map((u) => u.id);
-    if (!assignees.length) return res.status(400).json({ error: 'No active callers to assign to' });
+    // Shared persistent-cursor round-robin over agents AND callers (SCALE-9/20).
+    assignees = assignRoundRobin(db, ids.length);
+    if (!assignees.length) return res.status(400).json({ error: 'No active agents/callers to assign to' });
   } else {
     const userId = Number(req.body.assigned_to);
     const user = db.prepare('SELECT id FROM users WHERE id = ? AND is_active = 1').get(userId);
     if (!user) return res.status(400).json({ error: 'Invalid assignee' });
-    assignees = [userId];
+    assignees = ids.map(() => userId);
   }
 
   const update = db.prepare('UPDATE leads SET assigned_to = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL');
-  const moveFu = db.prepare("UPDATE follow_ups SET assigned_to = ? WHERE lead_id = ? AND status = 'pending'");
   db.transaction(() => {
     ids.forEach((id, i) => {
-      const to = assignees[i % assignees.length];
+      const to = assignees[i];
       update.run(to, nowUtc(), id);
-      moveFu.run(to, id);
+      moveOpenWork(to, id);
     });
   })();
   res.json({ ok: true, assigned: ids.length });

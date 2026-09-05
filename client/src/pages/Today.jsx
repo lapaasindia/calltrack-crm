@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, rupees, fmtDateTime, fmtDate, telLink, isOverdue, todayIstDate } from '../api.js';
-import { useApp } from '../App.jsx';
-import { LogCallModal, WhatsAppButton, StageBadge, TaskModal } from '../components.jsx';
+import { useApp } from '../ctx.js';
+import { useRequest } from '../hooks.js';
+import { canSeeAllLeads, isAssignable } from '../permissions.js';
+import { LogCallModal, WhatsAppButton, StageBadge, TaskModal, ErrorState, LoadingState, LeadLink } from '../components.jsx';
 
 function TargetBar({ label, done, target }) {
   const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
@@ -16,52 +18,47 @@ function TargetBar({ label, done, target }) {
 }
 
 export default function Today() {
-  const { user } = useApp();
+  const { user, showToast, canWrite } = useApp();
   const navigate = useNavigate();
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
+  const teamView = canSeeAllLeads(user.role);
   const [viewUser, setViewUser] = useState('me');
   const [users, setUsers] = useState([]);
   const [logging, setLogging] = useState(null); // {lead, type}
   const [addingTask, setAddingTask] = useState(false);
+  const [doneIds, setDoneIds] = useState(() => new Set()); // optimistic "mark done"
 
-  const completeTask = async (task) => {
-    try {
-      await api.patch(`/api/tasks/${task.id}`, { status: 'done' });
-      load();
-    } catch { /* toast handled globally */ }
-  };
+  const { data, error, loading, reload } = useRequest(({ signal }) => {
+    const q = teamView && viewUser !== 'me' ? `?user_id=${viewUser}` : '';
+    return api.get(`/api/today${q}`, { signal });
+  }, [teamView, viewUser]);
 
-  const load = useCallback(() => {
-    const q = user.role === 'admin' && viewUser !== 'me' ? `?user_id=${viewUser}` : '';
-    api.get(`/api/today${q}`)
-      .then((d) => { setData(d); setError(null); })
-      .catch((err) => setError(err.message));
-  }, [user.role, viewUser]);
-
-  useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const onVis = () => document.visibilityState === 'visible' && load();
+    const onVis = () => document.visibilityState === 'visible' && reload();
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [load]);
+  }, [reload]);
   useEffect(() => {
-    if (user.role === 'admin') {
-      api.get('/api/users').then((u) => setUsers(u.filter((x) => x.is_active))).catch(() => {});
+    if (teamView) {
+      api.get('/api/users').then((u) => setUsers(u.filter(isAssignable).filter((x) => x.id !== user.id))).catch(() => {});
     }
-  }, [user.role]);
+  }, [teamView, user.id]);
+
+  // Controlled checkbox with rollback (CLIENT-25): tick immediately, untick if
+  // the PATCH fails, and let the reload drop the row when it succeeds.
+  const completeTask = async (task) => {
+    setDoneIds((s) => new Set(s).add(task.id));
+    try {
+      await api.patch(`/api/tasks/${task.id}`, { status: 'done' });
+      reload();
+    } catch (err) {
+      setDoneIds((s) => { const n = new Set(s); n.delete(task.id); return n; });
+      showToast(err.message, 'error');
+    }
+  };
 
   if (!data) {
-    if (error) {
-      return (
-        <div className="card empty">
-          <div className="big">📡</div>
-          Could not load your queue: {error}
-          <div style={{ marginTop: 10 }}><button className="btn small" onClick={load}>Try again</button></div>
-        </div>
-      );
-    }
-    return null;
+    if (error) return <ErrorState error={error} onRetry={reload} title="Could not load your queue" />;
+    return loading ? <LoadingState /> : null;
   }
   const { stats } = data;
   const today = todayIstDate();
@@ -70,22 +67,27 @@ export default function Today() {
     <>
       <div className="page-title">
         <h1>Today</h1>
-        {user.role === 'admin' && (
-          <select value={viewUser} onChange={(e) => setViewUser(e.target.value)}
-            style={{ padding: '8px 11px', border: '1px solid var(--line)', borderRadius: 9 }}>
-            <option value="me">My queue</option>
-            <option value="all">Whole team</option>
-            {users.filter((u) => u.role === 'caller').map((u) => (
-              <option key={u.id} value={u.id}>{u.full_name}</option>
-            ))}
-          </select>
+        {teamView && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--ink-soft)' }}>
+            <span className="sr-only">Queue for</span>
+            <select value={viewUser} onChange={(e) => setViewUser(e.target.value)} aria-label="Queue for"
+              style={{ padding: '8px 11px', border: '1px solid var(--line)', borderRadius: 9, minHeight: 40 }}>
+              <option value="me">My queue</option>
+              <option value="all">Whole team</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>{u.full_name}</option>
+              ))}
+            </select>
+          </label>
         )}
       </div>
 
+      {error && <ErrorState error={error} onRetry={reload} compact />}
+
       <div className="stat-grid">
-        <TargetBar label="Calls" done={stats.calls} target={stats.target?.calls_target} />
-        <TargetBar label="Connects" done={stats.connects} target={stats.target?.connects_target} />
-        <TargetBar label="Deals" done={stats.deals} target={stats.target?.deals_target} />
+        <TargetBar label="Calls" done={stats.calls} target={stats.target && stats.target.calls_target} />
+        <TargetBar label="Connects" done={stats.connects} target={stats.target && stats.target.connects_target} />
+        <TargetBar label="Deals" done={stats.deals} target={stats.target && stats.target.deals_target} />
         <div className="stat">
           <div className="label">Leads touched</div>
           <div className="value">{stats.unique_leads}</div>
@@ -97,15 +99,15 @@ export default function Today() {
       </div>
       <div className="row-list">
         {data.followups.length === 0 && (
-          <div className="card empty"><div className="big">🎉</div>No follow-ups pending. Queue is clear!</div>
+          <div className="card empty"><div className="big" aria-hidden="true">🎉</div>No follow-ups pending. Queue is clear!</div>
         )}
         {data.followups.map((f) => {
           const overdue = isOverdue(f.due_at);
           return (
-            <div key={f.follow_up_id} className="lead-row" style={{ cursor: 'pointer' }}
+            <div key={f.follow_up_id} className="lead-row clickable"
               onClick={() => navigate(`/leads/${f.lead_id}`)}>
               <div className="info">
-                <div className="name">{f.name} <StageBadge stage={f.stage} /></div>
+                <div className="name"><LeadLink id={f.lead_id}>{f.name}</LeadLink> <StageBadge stage={f.stage} /></div>
                 <div className="meta">
                   <span className={`badge ${overdue ? 'overdue' : 'due'}`}>
                     {overdue ? `Overdue — ${fmtDateTime(f.due_at)}` : fmtDateTime(f.due_at)}
@@ -114,10 +116,12 @@ export default function Today() {
                 </div>
               </div>
               <div className="actions" onClick={(e) => e.stopPropagation()}>
-                <a className="act-btn call" href={telLink(f.phone)} title="Call">📞</a>
+                <a className="act-btn call" href={telLink(f.phone)} title="Call" aria-label={`Call ${f.name}`}>📞</a>
                 <WhatsAppButton lead={f} />
-                <button className="act-btn log" title="Log call"
-                  onClick={() => setLogging({ lead: { id: f.lead_id, name: f.name }, type: 'follow_up' })}>✍️</button>
+                {canWrite && (
+                  <button type="button" className="act-btn log" title="Log call" aria-label={`Log call with ${f.name}`}
+                    onClick={() => setLogging({ lead: { id: f.lead_id, name: f.name }, type: 'follow_up' })}>✍️</button>
+                )}
               </div>
             </div>
           );
@@ -133,12 +137,14 @@ export default function Today() {
         )}
         {data.payments_due.map((p) => {
           const overdue = p.due_date < today;
-          const remaining = p.amount_paise - p.paid_paise;
+          // Server-computed due_paise (linked + FIFO unlinked payments applied);
+          // older servers only send amount/paid.
+          const remaining = p.due_paise != null ? p.due_paise : p.amount_paise - p.paid_paise;
           return (
-            <div key={p.installment_id} className="lead-row" style={{ cursor: 'pointer' }}
+            <div key={p.installment_id} className="lead-row clickable"
               onClick={() => navigate(`/leads/${p.lead_id}`)}>
               <div className="info">
-                <div className="name">{p.name}</div>
+                <div className="name"><LeadLink id={p.lead_id}>{p.name}</LeadLink></div>
                 <div className="meta">
                   <span className={`badge ${overdue ? 'overdue' : 'due'}`}>
                     {overdue ? `Overdue since ${fmtDate(p.due_date)}` : `Due ${fmtDate(p.due_date)}`}
@@ -147,12 +153,14 @@ export default function Today() {
                 </div>
               </div>
               <div className="actions" onClick={(e) => e.stopPropagation()}>
-                <a className="act-btn call" href={telLink(p.phone)} title="Call">📞</a>
+                <a className="act-btn call" href={telLink(p.phone)} title="Call" aria-label={`Call ${p.name}`}>📞</a>
                 <WhatsAppButton lead={p} context={{
                   product: p.product_name, amount_due_paise: remaining, due_date: p.due_date,
                 }} />
-                <button className="act-btn log" title="Log call"
-                  onClick={() => setLogging({ lead: { id: p.lead_id, name: p.name }, type: 'collection' })}>✍️</button>
+                {canWrite && (
+                  <button type="button" className="act-btn log" title="Log call" aria-label={`Log call with ${p.name}`}
+                    onClick={() => setLogging({ lead: { id: p.lead_id, name: p.name }, type: 'collection' })}>✍️</button>
+                )}
               </div>
             </div>
           );
@@ -160,17 +168,20 @@ export default function Today() {
       </div>
 
       <div className="section-label">
-        ✅ Tasks {data.tasks?.length > 0 && `(${data.tasks.length})`}
-        <button className="btn small secondary" style={{ marginLeft: 10 }}
-          onClick={() => setAddingTask(true)}>+ Add</button>
+        ✅ Tasks {data.tasks && data.tasks.length > 0 && `(${data.tasks.length})`}
+        {canWrite && (
+          <button type="button" className="btn small secondary" style={{ marginLeft: 10 }}
+            onClick={() => setAddingTask(true)}>+ Add</button>
+        )}
       </div>
       <div className="row-list">
         {(!data.tasks || data.tasks.length === 0) && (
           <div className="card empty">No tasks due. Add one with the + button.</div>
         )}
-        {data.tasks?.map((t) => (
+        {data.tasks && data.tasks.map((t) => (
           <div key={t.id} className="lead-row">
-            <input type="checkbox" style={{ width: 19, height: 19 }} title="Mark done"
+            <input type="checkbox" className="row-check" aria-label={`Mark "${t.title}" done`}
+              checked={doneIds.has(t.id)} disabled={!canWrite || doneIds.has(t.id)}
               onChange={() => completeTask(t)} />
             <div className="info">
               <div className="name">
@@ -179,13 +190,13 @@ export default function Today() {
                 {t.source === 'ai' && <span className="badge new" style={{ marginLeft: 6 }}>AI</span>}
               </div>
               <div className="meta">
-                {t.lead_id && <Link to={`/leads/${t.lead_id}`} onClick={(e) => e.stopPropagation()}><b>{t.lead_name}</b></Link>}
+                {t.lead_id && <Link to={`/leads/${t.lead_id}`}><b>{t.lead_name}</b></Link>}
                 {t.details ? ` · ${t.details}` : ''}{viewUser === 'all' ? ` · ${t.assigned_to_name}` : ''}
               </div>
             </div>
             {t.lead_phone && (
               <div className="actions">
-                <a className="act-btn call" href={telLink(t.lead_phone)} title="Call">📞</a>
+                <a className="act-btn call" href={telLink(t.lead_phone)} title="Call" aria-label={`Call ${t.lead_name || ''}`}>📞</a>
               </div>
             )}
           </div>
@@ -196,11 +207,11 @@ export default function Today() {
         <Link to="/leads?stage=new" className="btn secondary">→ Call fresh leads</Link>
       </div>
 
-      {addingTask && <TaskModal onClose={() => setAddingTask(false)} onSaved={load} />}
+      {addingTask && <TaskModal onClose={() => setAddingTask(false)} onSaved={reload} />}
 
       {logging && (
         <LogCallModal lead={logging.lead} defaultType={logging.type}
-          onClose={() => setLogging(null)} onSaved={load} />
+          onClose={() => setLogging(null)} onSaved={reload} />
       )}
     </>
   );

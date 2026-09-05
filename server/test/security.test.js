@@ -189,12 +189,57 @@ test('M-7: a formula-injected lead source is defanged in the CSV export', async 
   assert.ok(!/(^|,)=HYPERLINK/.test(csv.text), 'no bare =HYPERLINK cell remains');
 });
 
-// ---- H-2: login lockout (runs LAST — it locks this IP) ----
-test('H-2: repeated failed logins are locked out', async () => {
-  for (let i = 0; i < 5; i++) {
-    const r = await login('lockuser', 'wrongpass');
-    assert.equal(r.status, 401, `attempt ${i + 1} is a normal auth failure`);
+// ---- H-2 / SEC-3: login throttling (runs LAST — it ends with this IP locked) ----
+// Redesigned limiter: per-(IP, existing username) lock after 5 failures, and a
+// per-IP escalating lock only AFTER 5 free failures per window. Failures for a
+// username that does not exist never touch a real account's key, so nobody can
+// lock a victim (or the whole office NAT) just by naming users.
+test('SEC-3: 5 bad passwords for user A do not block user B; (IP,user) lock holds; bogus names never lock a real user', async () => {
+  for (const [u, p] of [['locka', 'lockapass1'], ['lockb', 'lockbpass1']]) {
+    const r = await api('/api/users', {
+      method: 'POST', cookie: adminCookie, body: { username: u, full_name: u, password: p, role: 'caller' },
+    });
+    assert.equal(r.status, 200);
   }
-  const locked = await login('lockuser', 'wrongpass');
-  assert.equal(locked.status, 429, 'further attempts are rate-limited');
+
+  // Four wrong passwords for A are plain 401s; the fifth crosses the (IP, A)
+  // threshold and answers 429 + Retry-After so the client backs off.
+  for (let i = 0; i < 4; i++) {
+    const r = await login('locka', 'wrongpass');
+    assert.equal(r.status, 401, `attempt ${i + 1} for A is a normal auth failure`);
+  }
+  const fifth = await login('locka', 'wrongpass');
+  assert.equal(fifth.status, 429, 'fifth failure for A locks (IP, A)');
+  assert.ok(Number(fifth.headers.get('retry-after')) >= 1, 'Retry-After header set');
+
+  // B (same IP, correct password) is NOT collateral damage.
+  const bOk = await login('lockb', 'lockbpass1');
+  assert.equal(bOk.status, 200, 'user B logs in from the same IP while A is locked');
+  // A with the RIGHT password is still locked — the (IP, user) lock is real.
+  const aLocked = await login('locka', 'lockapass1');
+  assert.equal(aLocked.status, 429, '(IP, A) lock blocks A even with the correct password');
+
+  // Five failures for a NON-EXISTENT username only count toward the per-IP
+  // budget (5 free) — they lock neither a real user nor the IP.
+  for (let i = 0; i < 5; i++) {
+    const r = await login('ghost_zzz', 'whatever1');
+    assert.equal(r.status, 401, `bogus attempt ${i + 1} is a normal 401`);
+  }
+  const bStill = await login('lockb', 'lockbpass1');
+  assert.equal(bStill.status, 200, 'bogus-username failures did not lock a real user or the IP');
+});
+
+test('SEC-3: per-IP escalating lock engages after the free failures are spent', async () => {
+  // The previous test ended with a successful login (clears the IP budget).
+  for (let i = 0; i < 5; i++) {
+    const r = await login('ghost_ip', 'whatever1');
+    assert.equal(r.status, 401, `free failure ${i + 1}`);
+  }
+  const sixth = await login('ghost_ip', 'whatever1');
+  assert.equal(sixth.status, 429, 'sixth failure from one IP is throttled');
+  assert.ok(Number(sixth.headers.get('retry-after')) >= 1);
+  // While the IP is locked even a correct login from it is refused.
+  const bBlocked = await login('lockb', 'lockbpass1');
+  assert.equal(bBlocked.status, 429, 'per-IP lock applies to everyone behind that IP');
+  assert.match(bBlocked.data.error, /Too many attempts/);
 });

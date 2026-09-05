@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeFilename, dedupeFilename } from './downloads.js';
+import {
+  sanitizeFilename, dedupeFilename, downloadPolicy, extensionOf, isPartialDownload,
+  completedDownloads, SILENT_SAVE_EXTENSIONS,
+} from './downloads.js';
 
 const BS = String.fromCharCode(92); // backslash
 const ctl = (n) => String.fromCharCode(n);
@@ -73,4 +76,60 @@ test('dedupe sanitizes first (reserved name) before numbering', () => {
 test('dedupe on an extensionless dotfile appends after the name', () => {
   const taken = new Set(['.gitignore']);
   assert.equal(dedupeFilename('.gitignore', (n) => taken.has(n)), '.gitignore (1)');
+});
+
+// ---- DESK-9: download type allow-list ---------------------------------------
+
+test('the CRM\'s own export types save silently', () => {
+  for (const n of [
+    'funnel-2026-05-20-to-2026-06-18.csv', 'leads.xlsx', 'old-report.xls', 'Invoice-INV-0007.pdf',
+    'crm-2026-09-05.sqlite', 'export.json', 'recordings.zip', 'notes.txt',
+    'shot.png', 'a.jpg', 'a.JPEG', 'a.webp', 'call-1.m4a', 'x.mp3', 'x.wav', 'x.amr', 'x.3gp', 'x.opus', 'x.ogg',
+  ]) {
+    assert.equal(downloadPolicy(n), 'silent', n);
+  }
+});
+
+test('executables, scripts, installers and unknown types go through the Save dialog', () => {
+  for (const n of [
+    'Invoice.exe', 'setup.msi', 'CallTrack.dmg', 'run.bat', 'run.cmd', 'x.ps1', 'x.sh', 'x.js', 'x.html',
+    'shortcut.lnk', 'x.scr', 'x.jar', 'x.app', 'x.pkg', 'x.vbs', 'README', 'x.', 'x.exe ', 'Invoice.pdf.exe',
+  ]) {
+    assert.equal(downloadPolicy(n), 'ask', n);
+  }
+});
+
+test('extension is case-insensitive and read from the sanitized name', () => {
+  assert.equal(extensionOf('X.CSV'), 'csv');
+  assert.equal(extensionOf('report.csv.'), 'csv'); // trailing dot stripped first
+  assert.equal(extensionOf('CON.pdf'), 'pdf');
+  assert.equal(extensionOf('noext'), '');
+  assert.equal(SILENT_SAVE_EXTENSIONS.has('exe'), false);
+});
+
+// ---- DEP-5: partial downloads -----------------------------------------------
+
+test('Chromium in-flight partials are recognised', () => {
+  for (const n of ['export.csv.crdownload', 'smoke-renderer.csv.CRDOWNLOAD', 'x.part', 'x.tmp', 'Unconfirmed 1234.download']) {
+    assert.equal(isPartialDownload(n), true, n);
+  }
+  for (const n of ['export.csv', 'export (1).csv', 'crdownload.csv', 'x.parts', '']) {
+    assert.equal(isPartialDownload(n), false, n);
+  }
+});
+
+test('completedDownloads ignores partials when matching expected prefixes', () => {
+  assert.deepEqual(
+    completedDownloads(['export.csv.crdownload', 'smoke-renderer.csv.crdownload'], ['export', 'smoke-renderer']),
+    { export: false, 'smoke-renderer': false },
+  );
+  assert.deepEqual(
+    completedDownloads(['export.csv', 'smoke-renderer.csv.crdownload'], ['export', 'smoke-renderer']),
+    { export: true, 'smoke-renderer': false },
+  );
+  assert.deepEqual(
+    completedDownloads(['export (1).csv', 'smoke-renderer.csv'], ['export', 'smoke-renderer']),
+    { export: true, 'smoke-renderer': true },
+  );
+  assert.deepEqual(completedDownloads(undefined, ['a']), { a: false });
 });

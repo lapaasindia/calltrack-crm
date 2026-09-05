@@ -1,25 +1,60 @@
 import { Router } from 'express';
-import db, { getSetting, setSetting } from '../db.js';
+import path from 'node:path';
+import db, { getSetting, setSetting, DATA_DIR } from '../db.js';
 import { requireAdmin, requireOwner } from '../middleware/auth.js';
-import { runBackup } from '../lib/backup.js';
+import { runBackup, BACKUP_DIR } from '../lib/backup.js';
 import { sealSecret } from '../lib/secretBox.js';
+import { isAdmin } from '../lib/permissions.js';
+import { RECORDINGS_BASE } from './sync.js';
 
 const router = Router();
 
-// Company name is needed by all users for WhatsApp template rendering. The
-// invoice block + AI toggle feed later phases. The Sarvam key is write-only:
-// it's NEVER echoed back — only a boolean has_sarvam_key tells the UI it's set.
-router.get('/', (req, res) => {
-  res.json({
+const DEFAULT_UPLOAD_QUOTA_MB = 2048;
+const QUOTA_MIN_MB = 100;
+const QUOTA_MAX_MB = 100000;
+
+// What every logged-in user may see: the company name (WhatsApp template
+// rendering), the WhatsApp toggle (nav gate) and the GST % (price builder).
+function publicSettings() {
+  return {
     company_name: getSetting('company_name', 'Our Company'),
+    whatsapp_enabled: getSetting('whatsapp_enabled', false) === true,
+    gst_percent: getSetting('gst_percent', 18),
+  };
+}
+
+// Admin tier additionally sees the invoice block, the AI/backup state and the
+// upload quota. Non-admin roles get ONLY the public subset (QA-18): GSTIN,
+// legal address, whether a Sarvam key exists, cloud-AI state and backup state
+// are not for callers. The Sarvam key itself is write-only and never echoed —
+// only the boolean has_sarvam_key tells the UI it's set.
+router.get('/', (req, res) => {
+  if (!isAdmin(req.user.role)) return res.json(publicSettings());
+  res.json({
+    ...publicSettings(),
     last_backup: getSetting('last_backup', null),
     ai_cloud_enabled: getSetting('ai_cloud_enabled', false),
     has_sarvam_key: !!getSetting('sarvam_api_key', ''),
     company_legal_name: getSetting('company_legal_name', ''),
     company_address: getSetting('company_address', ''),
     company_gstin: getSetting('company_gstin', ''),
-    gst_percent: getSetting('gst_percent', 18),
-    whatsapp_enabled: getSetting('whatsapp_enabled', false) === true,
+    upload_daily_quota_mb: getSetting('upload_daily_quota_mb', DEFAULT_UPLOAD_QUOTA_MB),
+  });
+});
+
+// Where this server keeps its files — the desktop app in "attached" mode uses
+// it to open the right folders. Owner-only: filesystem layout is operator info.
+router.get('/paths', requireOwner, async (req, res) => {
+  let logsDir = process.env.CRM_LOG_DIR || path.join(DATA_DIR, 'logs');
+  try {
+    const { LOG_DIR } = await import('../lib/logger.js');
+    if (LOG_DIR) logsDir = LOG_DIR;
+  } catch { /* logger module optional — same default it uses */ }
+  res.json({
+    data_dir: path.resolve(DATA_DIR),
+    backup_dir: path.resolve(BACKUP_DIR),
+    recordings_dir: path.resolve(RECORDINGS_BASE),
+    logs_dir: path.resolve(logsDir),
   });
 });
 
@@ -52,13 +87,26 @@ router.put('/', requireOwner, (req, res) => {
     }
     setSetting('gst_percent', pct);
   }
+  // Per-device daily recording upload quota (audit SEC-6), whole MB.
+  if (req.body.upload_daily_quota_mb !== undefined) {
+    const mb = Number(req.body.upload_daily_quota_mb);
+    if (!Number.isInteger(mb) || mb < QUOTA_MIN_MB || mb > QUOTA_MAX_MB) {
+      return res.status(400).json({
+        error: `Upload quota must be a whole number of MB between ${QUOTA_MIN_MB} and ${QUOTA_MAX_MB}`,
+      });
+    }
+    setSetting('upload_daily_quota_mb', mb);
+  }
   res.json({ ok: true });
 });
 
-router.post('/backup-now', requireAdmin, (req, res) => {
+// runBackup() is async (non-blocking better-sqlite3 db.backup → verify →
+// rename); await it so the response carries the real file path and a failure
+// surfaces as a 500 instead of a resolved-looking `file: {}`.
+router.post('/backup-now', requireAdmin, async (req, res) => {
   try {
-    const file = runBackup();
-    res.json({ ok: true, file });
+    const file = await runBackup();
+    res.json({ ok: true, file, last_backup: getSetting('last_backup', null) });
   } catch (err) {
     res.status(500).json({ error: `Backup failed: ${err.message}` });
   }

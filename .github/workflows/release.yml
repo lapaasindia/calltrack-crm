@@ -1,0 +1,208 @@
+name: Release
+
+# Tag-driven: `node scripts/bump-version.mjs x.y.z` → commit → `git tag vx.y.z`
+# → `git push --follow-tags`. Builds every installer in CI (not on the office
+# Mac), attaches SHA256SUMS.txt + build provenance, and opens a DRAFT GitHub
+# release for the operator to review and publish.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   CALLTRACK_KEYSTORE_B64   base64 of the Android release keystore
+#                            (`base64 -i ~/.calltrack-build/calltrack-release.keystore | pbcopy`)
+#   CALLTRACK_KEYSTORE_PASS  its password (alias is `calltrack`, see build.gradle)
+# Without them the Android job is skipped with a warning and the release has no APK.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The tag must equal the version every runtime derives from package.json —
+  # otherwise /api/health, the installers and the release page disagree.
+  guard:
+    name: Tag matches package.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          set -eu
+          V="$(node -p "require('./package.json').version")"
+          C="$(node -p "require('./client/package.json').version")"
+          echo "package.json=$V client/package.json=$C tag=$GITHUB_REF_NAME"
+          test "v$V" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME != package.json $V — run scripts/bump-version.mjs"; exit 1; }
+          test "$C" = "$V" || { echo "::error::client/package.json $C != $V"; exit 1; }
+          grep -q "^## \[$V\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no [$V] section"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop installers (mac arm64 + x64, win x64)
+    needs: guard
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      # No Developer ID certificate in CI: electron-builder must not look for
+      # one; scripts/afterpack-sign.cjs applies the documented ad-hoc signature.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm --prefix client ci
+      - run: npm run icons
+      - run: npm run dist
+      - name: Collect assets
+        run: |
+          set -eu
+          mkdir -p out
+          cp release/*.dmg release/*.exe out/
+          cp release/*.blockmap out/ 2>/dev/null || true
+          cp release/latest*.yml out/ 2>/dev/null || true
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+  android:
+    name: Android release APK
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - id: ks
+        name: Keystore secret present?
+        env:
+          KS: ${{ secrets.CALLTRACK_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "::warning::CALLTRACK_KEYSTORE_B64 is not set — skipping the Android APK (add the secret to build it in CI)"; fi
+      - if: steps.ks.outputs.present == 'true'
+        uses: gradle/actions/wrapper-validation@v4
+      - if: steps.ks.outputs.present == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - if: steps.ks.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - if: steps.ks.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v4
+      - if: steps.ks.outputs.present == 'true'
+        run: npm ci --ignore-scripts
+      - if: steps.ks.outputs.present == 'true'
+        run: npx cap sync android
+      - if: steps.ks.outputs.present == 'true'
+        name: Decode keystore
+        env:
+          KS: ${{ secrets.CALLTRACK_KEYSTORE_B64 }}
+        run: echo "$KS" | base64 -d > "$RUNNER_TEMP/release.keystore"
+      - if: steps.ks.outputs.present == 'true'
+        run: ./gradlew assembleRelease --no-daemon
+        working-directory: mobile/android
+        env:
+          CALLTRACK_KEYSTORE: ${{ runner.temp }}/release.keystore
+          CALLTRACK_KEYSTORE_PASS: ${{ secrets.CALLTRACK_KEYSTORE_PASS }}
+      - if: steps.ks.outputs.present == 'true'
+        name: Verify the APK is release-signed and carries this version
+        run: |
+          set -eu
+          APK=mobile/android/app/build/outputs/apk/release/app-release.apk
+          node scripts/publish-apk.js "$APK" --out "$RUNNER_TEMP/apk-check" --dry-run
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          "$BT/aapt2" dump badging "$APK" | head -1 | grep -q "versionName='${{ needs.guard.outputs.version }}'" \
+            || { echo "::error::APK versionName != ${{ needs.guard.outputs.version }} — the Android build must derive its version from package.json"; exit 1; }
+          mkdir -p out
+          cp "$APK" "out/CallTrack-CRM-${{ needs.guard.outputs.version }}-android.apk"
+      - if: steps.ks.outputs.present == 'true'
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+      - if: steps.ks.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Checksums, provenance, draft release
+    needs: [guard, desktop, android]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.desktop.result == 'success' && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write        # create the draft release
+      id-token: write        # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+      - name: Flatten + SHA256SUMS
+        run: |
+          set -eu
+          mkdir -p dist
+          find assets -type f -exec cp {} dist/ \;
+          cd dist
+          sha256sum *.dmg *.exe *.apk 2>/dev/null > SHA256SUMS.txt || sha256sum *.dmg *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          ls -la
+      - name: Release notes from CHANGELOG.md
+        run: |
+          node -e '
+            const fs = require("fs");
+            const v = process.argv[1];
+            const md = fs.readFileSync("CHANGELOG.md", "utf8");
+            const m = new RegExp("^## \\[" + v.replace(/\./g, "\\.") + "\\][^\n]*\n([\\s\\S]*?)(?=^## \\[|\\Z)", "m").exec(md);
+            const body = (m ? m[1] : "").trim() || "_See CHANGELOG.md_";
+            fs.writeFileSync("RELEASE_NOTES.md", body + "\n\nVerify downloads against `SHA256SUMS.txt`; every asset carries a build-provenance attestation (`gh attestation verify <file> --repo ${{ github.repository }}`).\n");
+          ' "${{ needs.guard.outputs.version }}"
+          cat RELEASE_NOTES.md
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: CallTrack CRM ${{ needs.guard.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: false
+          files: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.apk
+            dist/*.blockmap
+            dist/latest*.yml
+            dist/SHA256SUMS.txt

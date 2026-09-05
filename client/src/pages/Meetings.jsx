@@ -1,66 +1,49 @@
 // Phase 5A — Meeting OS: meetings list with status/owner filters, dashboard
 // counts (Today / Upcoming / Running / Completed) and an AddMeetingModal.
 // All instants are UTC; the IST day for "Today" is derived via api helpers.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, fmtDateTime, todayIstDate, dtLocalToUtcIso, utcIsoToDtLocal } from '../api.js';
-import { useApp } from '../App.jsx';
+import { api, fmtDateTime, todayIstDate, dtLocalToUtcIso, utcIsoToDtLocal, istDateOf } from '../api.js';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
 import { isAdmin } from '../permissions.js';
-import { Modal } from '../components.jsx';
+import { Modal, ErrorState, LoadingState, Field, LeadPicker } from '../components.jsx';
 
 const STATUSES = ['Scheduled', 'In Progress', 'Completed', 'Cancelled'];
 
-// IST 'YYYY-MM-DD' of a UTC instant.
-function istDateOf(iso) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(iso));
+function StatusBadge({ status }) {
+  const cls = { Scheduled: 'new', 'In Progress': 'won', Completed: 'follow_up', Cancelled: 'muted' }[status] || 'new';
+  return <span className={`badge ${cls}`}>{status}</span>;
 }
 
-function StatusBadge({ status }) {
-  const map = {
-    Scheduled: { bg: 'var(--blue-soft)', fg: 'var(--blue)' },
-    'In Progress': { bg: 'var(--green-soft)', fg: 'var(--green)' },
-    Completed: { bg: 'var(--brand-soft)', fg: 'var(--brand)' },
-    Cancelled: { bg: '#f3f4f6', fg: '#6b7280' },
-  };
-  const c = map[status] || map.Scheduled;
-  return (
-    <span style={{
-      fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
-      background: c.bg, color: c.fg, whiteSpace: 'nowrap',
-    }}>{status}</span>
-  );
-}
+const activeUsers = (list) => (list || []).filter((u) => u.is_active === undefined || !!u.is_active);
 
 export default function Meetings() {
-  const { user, showToast } = useApp();
+  const { user, canWrite } = useApp();
   const navigate = useNavigate();
   const admin = isAdmin(user.role);
-  const [meetings, setMeetings] = useState([]);
   const [statusFilter, setStatusFilter] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [users, setUsers] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
 
-  const load = useCallback(() => {
-    api.get('/api/meetings')
-      .then(setMeetings)
-      .catch((e) => showToast(e.message, 'error'));
-  }, [showToast]);
+  const { data: meetings, error, loading, reload } = useRequest(
+    ({ signal }) => api.get('/api/meetings', { signal }), [],
+  );
 
-  useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    api.get('/api/users').then(setUsers).catch(() => {});
+    api.get('/api/users').then((u) => setUsers(activeUsers(u))).catch(() => {});
   }, []);
   useEffect(() => {
-    const onFocus = () => load();
+    const onFocus = () => reload();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [load]);
+  }, [reload]);
 
   const today = todayIstDate();
   const counts = useMemo(() => {
     let todayN = 0; let upcoming = 0; let running = 0; let completed = 0;
-    for (const m of meetings) {
+    for (const m of meetings || []) {
       if (m.status === 'In Progress') running += 1;
       if (m.status === 'Completed') completed += 1;
       if (m.status === 'Scheduled' || m.status === 'In Progress') {
@@ -72,7 +55,7 @@ export default function Meetings() {
     return { todayN, upcoming, running, completed };
   }, [meetings, today]);
 
-  const filtered = useMemo(() => meetings.filter((m) => {
+  const filtered = useMemo(() => (meetings || []).filter((m) => {
     if (statusFilter && m.status !== statusFilter) return false;
     if (ownerFilter && m.owner_id !== Number(ownerFilter)) return false;
     return true;
@@ -82,25 +65,25 @@ export default function Meetings() {
     <>
       <div className="page-title">
         <h1>Meetings</h1>
-        <button className="btn" onClick={() => setShowAdd(true)}>+ New meeting</button>
+        {canWrite && <button type="button" className="btn" onClick={() => setShowAdd(true)}>+ New meeting</button>}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10, marginBottom: 14 }}>
-        <StatCard label="Today" value={counts.todayN} color="var(--blue)" />
+        <StatCard label="Today" value={counts.todayN} color="var(--blue-text)" />
         <StatCard label="Upcoming" value={counts.upcoming} color="var(--brand)" />
-        <StatCard label="Running" value={counts.running} color="var(--green)" />
+        <StatCard label="Running" value={counts.running} color="var(--green-text)" />
         <StatCard label="Completed" value={counts.completed} color="var(--ink-soft)" />
       </div>
 
       <div className="card">
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+          <select value={statusFilter} aria-label="Status" onChange={(e) => setStatusFilter(e.target.value)}
             style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--line)' }}>
             <option value="">All statuses</option>
             {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           {admin && (
-            <select value={ownerFilter} onChange={(e) => setOwnerFilter(e.target.value)}
+            <select value={ownerFilter} aria-label="Owner" onChange={(e) => setOwnerFilter(e.target.value)}
               style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid var(--line)' }}>
               <option value="">All owners</option>
               {users.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
@@ -108,24 +91,26 @@ export default function Meetings() {
           )}
         </div>
 
-        {filtered.length === 0 ? (
-          <div style={{ padding: 24, textAlign: 'center', color: 'var(--ink-faint)' }}>
-            No meetings. Click "New meeting" to schedule one.
-          </div>
+        {error && !meetings && <ErrorState error={error} onRetry={reload} />}
+        {error && meetings && <ErrorState error={error} onRetry={reload} compact />}
+        {loading && !meetings && <LoadingState compact />}
+
+        {meetings && filtered.length === 0 ? (
+          <div className="empty">No meetings. Click "New meeting" to schedule one.</div>
         ) : (
           <div className="row-list">
             {filtered.map((m) => (
-              <button key={m.id} className="lead-row" style={{ width: '100%', textAlign: 'left' }}
+              <button key={m.id} type="button" className="lead-row clickable" style={{ width: '100%' }}
                 onClick={() => navigate(`/meetings/${m.id}`)}>
                 <div className="info">
-                  <div className="name" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <div className="name">
                     {m.title} <StatusBadge status={m.status} />
                   </div>
                   <div className="meta">
                     {fmtDateTime(m.start_at)} – {fmtDateTime(m.end_at)}
                     {m.owner_name ? ` · ${m.owner_name}` : ''}
                     {m.location ? ` · ${m.location}` : ''}
-                    {m.attendees?.length ? ` · ${m.attendees.length} attendee${m.attendees.length > 1 ? 's' : ''}` : ''}
+                    {m.attendees && m.attendees.length ? ` · ${m.attendees.length} attendee${m.attendees.length > 1 ? 's' : ''}` : ''}
                   </div>
                 </div>
               </button>
@@ -137,7 +122,7 @@ export default function Meetings() {
       {showAdd && (
         <AddMeetingModal users={users}
           onClose={() => setShowAdd(false)}
-          onSaved={(id) => { setShowAdd(false); load(); if (id) navigate(`/meetings/${id}`); }} />
+          onSaved={(id) => { setShowAdd(false); reload(); if (id) navigate(`/meetings/${id}`); }} />
       )}
     </>
   );
@@ -154,7 +139,6 @@ function StatCard({ label, value, color }) {
 
 export function AddMeetingModal({ users, onClose, onSaved }) {
   const { user, showToast } = useApp();
-  const [leads, setLeads] = useState([]);
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState(() => {
     // Default start: next 15 min round (IST wall time for the input); end +30.
@@ -169,11 +153,9 @@ export function AddMeetingModal({ users, onClose, onSaved }) {
       lead_id: '', deal_id: '', project_id: '',
     };
   });
-  const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   useEffect(() => {
-    api.get('/api/leads?limit=200').then((r) => setLeads(Array.isArray(r) ? r : (r.leads || []))).catch(() => {});
     api.get('/api/projects').then(setProjects).catch(() => {});
   }, []);
 
@@ -184,19 +166,19 @@ export function AddMeetingModal({ users, onClose, onSaved }) {
       : [...f.attendee_ids, id],
   }));
 
-  const save = async () => {
+  const [save, saving] = useSubmit(async () => {
     if (!form.title.trim()) return showToast('Title required', 'error');
     if (!form.start || !form.end) return showToast('Pick start and end times', 'error');
     const start_at = dtLocalToUtcIso(form.start);
     const end_at = dtLocalToUtcIso(form.end);
     if (!(new Date(start_at) < new Date(end_at))) return showToast('Start must be before end', 'error');
-    setSaving(true);
+    if (form.meeting_url && !/^https?:\/\//i.test(form.meeting_url.trim())) return showToast('Meeting URL must start with http:// or https://', 'error');
     try {
       const r = await api.post('/api/meetings', {
         title: form.title.trim(),
         description: form.description || undefined,
         location: form.location || undefined,
-        meeting_url: form.meeting_url || undefined,
+        meeting_url: form.meeting_url.trim() || undefined,
         start_at, end_at,
         owner_id: Number(form.owner_id),
         attendee_ids: form.attendee_ids,
@@ -207,80 +189,74 @@ export function AddMeetingModal({ users, onClose, onSaved }) {
       onSaved(r.id);
     } catch (err) {
       showToast(err.message, 'error');
-    } finally { setSaving(false); }
-  };
+    }
+    return undefined;
+  });
 
   const userOptions = users.length ? users : [{ id: user.id, full_name: user.full_name }];
 
   return (
     <Modal title="New meeting" onClose={onClose}>
-      <div className="field">
-        <label>Title</label>
+      <Field label="Title">
         <input value={form.title} onChange={set('title')} autoFocus placeholder="e.g. Sprint planning" />
-      </div>
-      <div className="field">
-        <label>Description (optional)</label>
+      </Field>
+      <Field label="Description (optional)">
         <textarea rows={2} value={form.description} onChange={set('description')} />
-      </div>
+      </Field>
       <div className="form-grid">
-        <div className="field">
-          <label>Start (IST)</label>
+        <Field label="Start (IST)">
           <input type="datetime-local" value={form.start} onChange={set('start')} />
-        </div>
-        <div className="field">
-          <label>End (IST)</label>
+        </Field>
+        <Field label="End (IST)">
           <input type="datetime-local" value={form.end} onChange={set('end')} />
-        </div>
+        </Field>
       </div>
       <div className="form-grid">
-        <div className="field">
-          <label>Location (optional)</label>
+        <Field label="Location (optional)">
           <input value={form.location} onChange={set('location')} placeholder="Room / address" />
-        </div>
-        <div className="field">
-          <label>Meeting URL (optional)</label>
-          <input value={form.meeting_url} onChange={set('meeting_url')} placeholder="https://…" />
-        </div>
+        </Field>
+        <Field label="Meeting URL (optional)">
+          <input type="url" inputMode="url" value={form.meeting_url} onChange={set('meeting_url')} placeholder="https://…" />
+        </Field>
       </div>
-      <div className="field">
-        <label>Owner</label>
+      <Field label="Owner">
         <select value={form.owner_id} onChange={set('owner_id')}>
           {userOptions.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
         </select>
-      </div>
+      </Field>
       <div className="field">
         <label>Attendees</label>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {userOptions.map((u) => (
-            <button key={u.id} type="button" onClick={() => toggleAttendee(u.id)}
-              style={{
-                fontSize: 12, padding: '4px 10px', borderRadius: 999, cursor: 'pointer',
-                border: `1px solid ${form.attendee_ids.includes(u.id) ? 'var(--brand)' : 'var(--line)'}`,
-                background: form.attendee_ids.includes(u.id) ? 'var(--brand-soft)' : 'var(--surface)',
-                color: form.attendee_ids.includes(u.id) ? 'var(--brand)' : 'var(--ink)',
-              }}>{u.full_name}</button>
-          ))}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} role="group" aria-label="Attendees">
+          {userOptions.map((u) => {
+            const on = form.attendee_ids.includes(u.id);
+            return (
+              <button key={u.id} type="button" onClick={() => toggleAttendee(u.id)} aria-pressed={on}
+                style={{
+                  fontSize: 12, padding: '6px 10px', borderRadius: 999, cursor: 'pointer', minHeight: 32,
+                  border: `1px solid ${on ? 'var(--brand)' : 'var(--line)'}`,
+                  background: on ? 'var(--brand-soft)' : 'var(--surface)',
+                  color: on ? 'var(--brand-dark)' : 'var(--ink)', fontFamily: 'inherit',
+                }}>{u.full_name}</button>
+            );
+          })}
         </div>
       </div>
       <div className="form-grid">
         <div className="field">
-          <label>Link lead (optional)</label>
-          <select value={form.lead_id} onChange={set('lead_id')}>
-            <option value="">None</option>
-            {leads.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </select>
+          <label htmlFor="meeting-lead">Link lead (optional)</label>
+          <LeadPicker id="meeting-lead" value={form.lead_id} noneLabel="None"
+            onChange={(id) => setForm((f) => ({ ...f, lead_id: id }))} />
         </div>
-        <div className="field">
-          <label>Link project (optional)</label>
+        <Field label="Link project (optional)">
           <select value={form.project_id} onChange={set('project_id')}>
             <option value="">None</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-        </div>
+        </Field>
       </div>
       <div className="modal-actions">
-        <button className="btn secondary" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={saving} onClick={save}>Schedule meeting</button>
+        <button type="button" className="btn secondary" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" disabled={saving} onClick={save}>{saving ? 'Scheduling…' : 'Schedule meeting'}</button>
       </div>
     </Modal>
   );

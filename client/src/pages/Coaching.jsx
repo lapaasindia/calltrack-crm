@@ -1,12 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, todayIstDate, fmtDate } from '../api.js';
-import { useApp } from '../App.jsx';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
 import { isAdmin } from '../permissions.js';
+import { ErrorState, Field, LoadingState } from '../components.jsx';
 
 const GRADE_COLOR = {
-  'A+': 'var(--green)', A: 'var(--green)', B: 'var(--blue)',
-  C: 'var(--amber)', D: 'var(--amber)', F: 'var(--red)', 'N/A': 'var(--ink-faint)',
+  'A+': 'var(--green-text)', A: 'var(--green-text)', B: 'var(--blue-text)',
+  C: 'var(--amber-text)', D: 'var(--amber-text)', F: 'var(--red-text)', 'N/A': 'var(--ink-faint)',
 };
 
 // One 0..10 skill axis as an inline CSS bar (NO chart library).
@@ -86,7 +88,7 @@ function ReportCard({ card }) {
         </div>
         {card.currentStreak > 0 && (
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 30 }}>🔥</div>
+            <div style={{ fontSize: 30 }} aria-hidden="true">🔥</div>
             <div style={{ fontWeight: 800, fontSize: 22 }}>{card.currentStreak}</div>
             <div style={{ fontSize: 12, color: 'var(--ink-soft)' }}>day streak</div>
           </div>
@@ -97,7 +99,7 @@ function ReportCard({ card }) {
         <Stat label="Calls today" value={card.callsToday} sub={`${card.connected} connected`} />
         <Stat label="Connect rate" value={card.conversionRate == null ? '—' : `${card.conversionRate}%`} />
         <Stat label="Positive calls" value={card.positivePct == null ? '—' : `${card.positivePct}%`} sub="by sentiment" />
-        <Stat label="Hot leads" value={card.hotLeads?.length || 0} sub="to chase today" />
+        <Stat label="Hot leads" value={(card.hotLeads && card.hotLeads.length) || 0} sub="to chase today" />
       </div>
 
       <div className="card">
@@ -116,16 +118,16 @@ function ReportCard({ card }) {
 
       <div className="two-col" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
         <div className="card">
-          <h2 style={{ color: 'var(--green)' }}>✅ Strengths</h2>
-          {card.topStrengths?.length
+          <h2 style={{ color: 'var(--green-text)' }}>✅ Strengths</h2>
+          {card.topStrengths && card.topStrengths.length
             ? <ul style={{ margin: 0, paddingLeft: 18 }}>{card.topStrengths.map((s, i) => (
               <li key={i} style={{ marginBottom: 4 }}>{s.text} {s.count > 1 && <span style={{ color: 'var(--ink-faint)' }}>×{s.count}</span>}</li>
             ))}</ul>
             : <div style={{ color: 'var(--ink-soft)' }}>No strengths captured yet.</div>}
         </div>
         <div className="card">
-          <h2 style={{ color: 'var(--red)' }}>🎯 Focus areas</h2>
-          {card.topFocusAreas?.length
+          <h2 style={{ color: 'var(--red-text)' }}>🎯 Focus areas</h2>
+          {card.topFocusAreas && card.topFocusAreas.length
             ? <ul style={{ margin: 0, paddingLeft: 18 }}>{card.topFocusAreas.map((s, i) => (
               <li key={i} style={{ marginBottom: 4 }}>{s.text} {s.count > 1 && <span style={{ color: 'var(--ink-faint)' }}>×{s.count}</span>}</li>
             ))}</ul>
@@ -133,11 +135,11 @@ function ReportCard({ card }) {
         </div>
       </div>
 
-      {card.hotLeads?.length > 0 && (
+      {card.hotLeads && card.hotLeads.length > 0 && (
         <div className="card">
           <h2>🔥 Hot leads</h2>
           <div className="table-wrap">
-            <table>
+            <table className="data">
               <thead><tr><th>Lead</th><th>Phone</th><th>Intent</th><th>Score</th></tr></thead>
               <tbody>
                 {card.hotLeads.map((l) => (
@@ -162,41 +164,35 @@ function LearningForm({ onSaved }) {
   const [learning, setLearning] = useState('');
   const [win, setWin] = useState('');
   const [challenge, setChallenge] = useState('');
-  const [saving, setSaving] = useState(false);
 
-  const submit = async (e) => {
+  const [submit, saving] = useSubmit(async (e) => {
     e.preventDefault();
     if (!learning.trim()) { showToast('Write at least one learning', 'error'); return; }
-    setSaving(true);
     try {
       await api.post('/api/coaching/learnings', {
         learning: learning.trim(), win: win.trim() || undefined, challenge: challenge.trim() || undefined,
       });
       setLearning(''); setWin(''); setChallenge('');
       showToast('Logged ✓');
-      onSaved?.();
+      if (onSaved) onSaved();
     } catch (err) { showToast(err.message, 'error'); }
-    finally { setSaving(false); }
-  };
+  });
 
   return (
     <div className="card">
       <h2>📝 Daily learning check-in</h2>
       <form onSubmit={submit}>
-        <div className="field">
-          <label>What did you learn today? *</label>
+        <Field label="What did you learn today? *">
           <textarea rows={2} value={learning} onChange={(e) => setLearning(e.target.value)}
             placeholder="One thing you'll do differently on the next call…" />
-        </div>
+        </Field>
         <div className="form-grid">
-          <div className="field">
-            <label>A win 🎉</label>
+          <Field label="A win 🎉">
             <input value={win} onChange={(e) => setWin(e.target.value)} placeholder="e.g. closed a tough objection" />
-          </div>
-          <div className="field">
-            <label>A challenge 😤</label>
+          </Field>
+          <Field label="A challenge 😤">
             <input value={challenge} onChange={(e) => setChallenge(e.target.value)} placeholder="e.g. pricing pushback" />
-          </div>
+          </Field>
         </div>
         <button className="btn" disabled={saving}>{saving ? 'Saving…' : 'Log today\'s learning'}</button>
       </form>
@@ -205,7 +201,7 @@ function LearningForm({ onSaved }) {
 }
 
 function LearningHistory({ items }) {
-  if (!items?.length) return null;
+  if (!items || !items.length) return null;
   const SRC = { manual: '✍️', daily_check_in: '📝', deal_closed: '💰' };
   return (
     <div className="card">
@@ -214,18 +210,18 @@ function LearningHistory({ items }) {
         {items.slice(0, 12).map((l) => (
           <li key={l.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-              <span>{SRC[l.source] || '•'}</span>
-              <div style={{ flex: 1 }}>
+              <span aria-hidden="true">{SRC[l.source] || '•'}</span>
+              <div style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
                 <div>{l.learning}</div>
                 {(l.win || l.challenge) && (
                   <div style={{ fontSize: 12, color: 'var(--ink-soft)', marginTop: 2 }}>
-                    {l.win && <span style={{ color: 'var(--green)' }}>🎉 {l.win}</span>}
+                    {l.win && <span style={{ color: 'var(--green-text)' }}>🎉 {l.win}</span>}
                     {l.win && l.challenge && '  ·  '}
-                    {l.challenge && <span style={{ color: 'var(--red)' }}>😤 {l.challenge}</span>}
+                    {l.challenge && <span style={{ color: 'var(--red-text)' }}>😤 {l.challenge}</span>}
                   </div>
                 )}
               </div>
-              <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{fmtDate(l.entry_date)}</span>
+              <span style={{ fontSize: 12, color: 'var(--ink-faint)', whiteSpace: 'nowrap' }}>{fmtDate(l.entry_date)}</span>
             </div>
           </li>
         ))}
@@ -237,10 +233,9 @@ function LearningHistory({ items }) {
 const MEDAL = ['🏆', '🥈', '🥉'];
 
 function Leaderboard({ onPick, selectedId }) {
-  const [board, setBoard] = useState(null);
-  useEffect(() => {
-    api.get('/api/coaching/leaderboard').then((d) => setBoard(d.leaderboard)).catch(() => setBoard([]));
-  }, []);
+  const { data, error, reload } = useRequest(({ signal }) => api.get('/api/coaching/leaderboard', { signal }), []);
+  const board = data && data.leaderboard;
+  if (error && !data) return <ErrorState error={error} onRetry={reload} compact />;
   if (!board) return null;
   return (
     <div className="card">
@@ -249,15 +244,15 @@ function Leaderboard({ onPick, selectedId }) {
         ? <div style={{ color: 'var(--ink-soft)' }}>No agents/callers to rank yet.</div>
         : (
           <div className="table-wrap">
-            <table>
-              <thead><tr><th></th><th>Member</th><th>Avg rating</th><th>Grade</th><th>Calls</th></tr></thead>
+            <table className="data">
+              <thead><tr><th><span className="sr-only">Rank</span></th><th>Member</th><th>Avg rating</th><th>Grade</th><th>Calls</th></tr></thead>
               <tbody>
                 {board.map((m, i) => (
-                  <tr key={m.user_id}
+                  <tr key={m.user_id} className="clickable"
                     onClick={() => onPick(m.user_id)}
-                    style={{ cursor: 'pointer', background: m.user_id === selectedId ? 'var(--brand-soft)' : undefined }}>
+                    style={{ background: m.user_id === selectedId ? 'var(--brand-soft)' : undefined }}>
                     <td style={{ fontSize: 18 }}>{MEDAL[i] || (i + 1)}</td>
-                    <td><b>{m.user_name}</b></td>
+                    <td><button type="button" className="linklike" style={{ color: 'var(--ink)' }} onClick={() => onPick(m.user_id)}>{m.user_name}</button></td>
                     <td>{m.avgRating == null ? '—' : `${m.avgRating}/10`}</td>
                     <td>{m.grade}</td>
                     <td>{m.analyzedCalls}/{m.callsTotal}</td>
@@ -272,23 +267,13 @@ function Leaderboard({ onPick, selectedId }) {
 }
 
 export default function Coaching() {
-  const { user } = useApp();
+  const { user, canWrite } = useApp();
   const admin = isAdmin(user.role);
   const [viewUserId, setViewUserId] = useState(user.id);
-  const [card, setCard] = useState(null);
-  const [learnings, setLearnings] = useState([]);
+  const q = viewUserId === user.id ? '' : `?user_id=${viewUserId}`;
 
-  const loadLearnings = useCallback(() => {
-    const q = viewUserId === user.id ? '' : `?user_id=${viewUserId}`;
-    api.get(`/api/coaching/learnings${q}`).then(setLearnings).catch(() => setLearnings([]));
-  }, [viewUserId, user.id]);
-
-  useEffect(() => {
-    setCard(null);
-    const q = viewUserId === user.id ? '' : `?user_id=${viewUserId}`;
-    api.get(`/api/coaching/daily${q}`).then(setCard).catch(() => setCard(null));
-    loadLearnings();
-  }, [viewUserId, user.id, loadLearnings]);
+  const cardReq = useRequest(({ signal }) => api.get(`/api/coaching/daily${q}`, { signal }), [q]);
+  const learningsReq = useRequest(({ signal }) => api.get(`/api/coaching/learnings${q}`, { signal }), [q]);
 
   const viewingSelf = viewUserId === user.id;
 
@@ -297,17 +282,20 @@ export default function Coaching() {
       <div className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <h1>Coaching</h1>
         {!viewingSelf && (
-          <button className="btn small secondary" onClick={() => setViewUserId(user.id)}>← Back to my card</button>
+          <button type="button" className="btn small secondary" onClick={() => setViewUserId(user.id)}>← Back to my card</button>
         )}
         <span style={{ marginLeft: 'auto', color: 'var(--ink-soft)', fontSize: 13 }}>{todayIstDate()}</span>
       </div>
 
       {admin && <Leaderboard onPick={setViewUserId} selectedId={viewUserId} />}
 
-      <ReportCard card={card} />
+      {cardReq.error && !cardReq.data && <ErrorState error={cardReq.error} onRetry={cardReq.reload} />}
+      {cardReq.loading && !cardReq.data && <LoadingState compact />}
+      <ReportCard card={cardReq.data} />
 
-      {viewingSelf && <LearningForm onSaved={loadLearnings} />}
-      <LearningHistory items={learnings} />
+      {viewingSelf && canWrite && <LearningForm onSaved={learningsReq.reload} />}
+      {learningsReq.error && !learningsReq.data && <ErrorState error={learningsReq.error} onRetry={learningsReq.reload} compact />}
+      <LearningHistory items={learningsReq.data} />
     </>
   );
 }

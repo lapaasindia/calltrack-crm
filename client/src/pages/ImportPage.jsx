@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
-import { useApp } from '../App.jsx';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
+import { isAssignable, RR_ROLES } from '../permissions.js';
+import { ErrorState, Field } from '../components.jsx';
 
 const FIELDS = [
   ['name', 'Name *'], ['phone', 'Phone *'], ['alt_phone', 'Alt phone'],
@@ -15,10 +17,11 @@ const FIELDS = [
 const AUTO_PATTERNS = {
   name: [/full[_ ]?name/i, /^name$/i, /your[_ ]?name/i, /candidate/i, /नाम/],
   phone: [/phone/i, /mobile/i, /contact[_ ]?n/i, /whatsapp/i, /फ़?ोन/, /मोबाइल/],
+  alt_phone: [/alt(ernate)?[_ ]?(phone|mobile|number)/i, /second(ary)?[_ ]?(phone|mobile)/i],
   email: [/e-?mail/i],
   city: [/city/i, /location/i, /शहर/],
   source: [/source/i, /campaign[_ ]?name/i],
-  notes: [/message/i, /comments?/i, /remarks?/i],
+  notes: [/^notes?$/i, /message/i, /comments?/i, /remarks?/i, /notes/i],
 };
 
 function detectPreset(headers) {
@@ -30,7 +33,7 @@ function detectPreset(headers) {
   return null;
 }
 
-function autoMap(headers) {
+export function autoMap(headers) {
   const map = {};
   for (const [field] of FIELDS) {
     const patterns = AUTO_PATTERNS[field] || [];
@@ -45,9 +48,11 @@ function autoMap(headers) {
 const ALLOWED_EXT = ['csv', 'xlsx', 'xls'];
 
 // Strip BOM (else it glues to the first header and breaks mapping) and decode.
+// SheetJS (~330 KB) is only downloaded when an Excel file is actually chosen.
 async function parseFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   if (ext === 'xlsx' || ext === 'xls') {
+    const XLSX = await import('xlsx');
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -76,23 +81,26 @@ export default function ImportPage() {
   const { showToast } = useApp();
   const [step, setStep] = useState(1);
   const [file, setFile] = useState(null);
+  const [fileKey, setFileKey] = useState(0); // remount the <input type=file> so the same file can be re-picked
   const [parsed, setParsed] = useState(null);
   const [mapping, setMapping] = useState({});
   const [preset, setPreset] = useState(null);
   const [defaultSource, setDefaultSource] = useState('import');
   const [assignMode, setAssignMode] = useState('none');
   const [assignTo, setAssignTo] = useState('');
-  const [users, setUsers] = useState([]);
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [batches, setBatches] = useState([]);
 
-  useEffect(() => {
-    api.get('/api/users').then((u) => setUsers(u.filter((x) => x.is_active && x.role === 'caller'))).catch(() => {});
-    api.get('/api/imports').then(setBatches).catch(() => {});
-  }, []);
+  const usersReq = useRequest(({ signal }) => api.get('/api/users', { signal }), []);
+  const batchesReq = useRequest(({ signal }) => api.get('/api/imports', { signal }), []);
+  const users = (usersReq.data || []).filter(isAssignable);
+  const rrPool = users.filter((u) => RR_ROLES.includes(u.role));
+  const batches = batchesReq.data || [];
 
-  const onFile = async (f) => {
+  const onFile = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    setFileKey((k) => k + 1);
     if (!f) return;
     // Real gate (the dialog's accept= is bypassable and ignored on drag-drop).
     const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -135,8 +143,7 @@ export default function ImportPage() {
     });
   }, [parsed, mapping]);
 
-  const doImport = async () => {
-    setBusy(true);
+  const [doImport, importing] = useSubmit(async () => {
     try {
       const res = await api.post('/api/imports', {
         filename: file.name,
@@ -148,14 +155,13 @@ export default function ImportPage() {
       });
       setResult(res);
       setStep(3);
+      batchesReq.reload();
     } catch (err) {
       showToast(err.message, 'error');
-    } finally {
-      setBusy(false);
     }
-  };
+  });
 
-  const mergeNote = async (dup) => {
+  const [mergeNote, merging] = useSubmit(async (dup) => {
     try {
       await api.post('/api/imports/merge-note', {
         lead_id: dup.existing_id,
@@ -163,9 +169,9 @@ export default function ImportPage() {
       });
       showToast('Note added to existing lead ✓');
     } catch (err) { showToast(err.message, 'error'); }
-  };
+  });
 
-  const reset = () => { setStep(1); setFile(null); setParsed(null); setResult(null); };
+  const reset = () => { setStep(1); setFile(null); setParsed(null); setResult(null); setFileKey((k) => k + 1); };
 
   return (
     <>
@@ -180,9 +186,11 @@ export default function ImportPage() {
               spreadsheet with names and phone numbers. For Hindi names, prefer .xlsx — Excel-saved
               CSVs often destroy them.
             </p>
-            <input type="file" accept=".csv,.xlsx,.xls" disabled={busy}
-              onChange={(e) => onFile(e.target.files[0])} />
+            <label htmlFor="import-file" className="sr-only">Choose a CSV or Excel file</label>
+            <input key={fileKey} id="import-file" type="file" accept=".csv,.xlsx,.xls" disabled={busy} onChange={onFile} />
+            {busy && <div className="hint" style={{ marginTop: 6 }}>Reading file…</div>}
           </div>
+          {batchesReq.error && <ErrorState error={batchesReq.error} onRetry={batchesReq.reload} compact />}
           {batches.length > 0 && (
             <div className="card">
               <h2>Past imports</h2>
@@ -192,11 +200,11 @@ export default function ImportPage() {
                   <tbody>
                     {batches.map((b) => (
                       <tr key={b.id}>
-                        <td>{b.filename}</td>
+                        <td style={{ overflowWrap: 'anywhere' }}>{b.filename}</td>
                         <td className="num">{b.total_rows}</td>
-                        <td className="num" style={{ color: 'var(--green)' }}>{b.imported_count}</td>
+                        <td className="num" style={{ color: 'var(--green-text)' }}>{b.imported_count}</td>
                         <td className="num">{b.duplicate_count}</td>
-                        <td className="num" style={{ color: b.invalid_count ? 'var(--red)' : undefined }}>{b.invalid_count}</td>
+                        <td className="num" style={{ color: b.invalid_count ? 'var(--red-text)' : undefined }}>{b.invalid_count}</td>
                         <td>{b.imported_by_name}</td>
                       </tr>
                     ))}
@@ -211,46 +219,45 @@ export default function ImportPage() {
       {step === 2 && parsed && (
         <>
           <div className="card">
-            <h2>
+            <h2 style={{ overflowWrap: 'anywhere' }}>
               Map columns — {file.name} ({parsed.rows.length} rows)
               {preset && <span className="badge new" style={{ marginLeft: 8 }}>
                 {preset === 'meta' ? 'Meta Lead Ads detected' : 'Google Forms detected'}</span>}
             </h2>
             {parsed.encodingWarning && (
-              <p className="err">⚠️ This CSV isn't UTF-8 — Hindi/special characters may look wrong below.
+              <p className="err" role="alert">⚠️ This CSV isn't UTF-8 — Hindi/special characters may look wrong below.
                 If they do, re-export as .xlsx or "CSV UTF-8".</p>
             )}
             <div className="form-grid">
               {FIELDS.map(([field, label]) => (
-                <div className="field" key={field}>
-                  <label>{label}</label>
+                <Field label={label} key={field}>
                   <select value={mapping[field] || ''}
                     onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value || undefined }))}>
                     <option value="">— not in file —</option>
                     {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
                   </select>
-                </div>
+                </Field>
               ))}
             </div>
             <div className="form-grid">
-              <div className="field">
-                <label>Source tag for these leads</label>
+              <Field label="Source tag for these leads">
                 <input value={defaultSource} onChange={(e) => setDefaultSource(e.target.value)} />
-              </div>
-              <div className="field">
-                <label>Assign to</label>
+              </Field>
+              <Field label="Assign to">
                 <select value={assignMode} onChange={(e) => setAssignMode(e.target.value)}>
                   <option value="none">Leave unassigned</option>
-                  <option value="rr">Distribute equally among callers</option>
-                  <option value="one">One caller</option>
+                  <option value="rr">Distribute equally among agents/callers{rrPool.length ? ` (${rrPool.length})` : ''}</option>
+                  <option value="one">One team member</option>
                 </select>
-                {assignMode === 'one' && (
-                  <select style={{ marginTop: 6 }} value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
-                    <option value="">Pick caller…</option>
+              </Field>
+              {assignMode === 'one' && (
+                <Field label="Team member">
+                  <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+                    <option value="">Pick team member…</option>
                     {users.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
                   </select>
-                )}
-              </div>
+                </Field>
+              )}
             </div>
           </div>
 
@@ -258,7 +265,7 @@ export default function ImportPage() {
             <h2>Preview (first 10 rows — check names & phones look right)</h2>
             <div className="table-wrap">
               <table className="data">
-                <thead><tr><th>#</th><th>Name</th><th>Phone</th><th>City</th><th>Email</th></tr></thead>
+                <thead><tr><th>#</th><th>Name</th><th>Phone</th><th>City</th><th>Email</th><th>Notes</th></tr></thead>
                 <tbody>
                   {mappedRows.slice(0, 10).map((r, i) => (
                     <tr key={i}>
@@ -268,16 +275,17 @@ export default function ImportPage() {
                         {/e\+/i.test(String(r.phone)) && <span className="badge overdue" style={{ marginLeft: 6 }}>Excel-mangled</span>}
                       </td>
                       <td>{r.city}</td><td>{r.email}</td>
+                      <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.notes}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
             <div className="modal-actions" style={{ maxWidth: 420 }}>
-              <button className="btn secondary" onClick={reset}>← Different file</button>
-              <button className="btn" disabled={busy || !mapping.name || !mapping.phone || (assignMode === 'one' && !assignTo)}
+              <button type="button" className="btn secondary" onClick={reset}>← Different file</button>
+              <button type="button" className="btn" disabled={importing || !mapping.name || !mapping.phone || (assignMode === 'one' && !assignTo)}
                 onClick={doImport}>
-                {busy ? 'Importing…' : `Import ${mappedRows.length} leads`}
+                {importing ? 'Importing…' : `Import ${mappedRows.length} leads`}
               </button>
             </div>
             {(!mapping.name || !mapping.phone) && (
@@ -291,11 +299,11 @@ export default function ImportPage() {
         <>
           <div className="stat-grid">
             <div className="stat"><div className="label">Imported</div>
-              <div className="value" style={{ color: 'var(--green)' }}>{result.imported}</div></div>
+              <div className="value" style={{ color: 'var(--green-text)' }}>{result.imported}</div></div>
             <div className="stat"><div className="label">Duplicates</div>
-              <div className="value" style={{ color: 'var(--amber)' }}>{result.duplicates.length}</div></div>
+              <div className="value" style={{ color: 'var(--amber-text)' }}>{result.duplicates.length}</div></div>
             <div className="stat"><div className="label">Invalid</div>
-              <div className="value" style={{ color: result.invalid.length ? 'var(--red)' : undefined }}>{result.invalid.length}</div></div>
+              <div className="value" style={{ color: result.invalid.length ? 'var(--red-text)' : undefined }}>{result.invalid.length}</div></div>
           </div>
 
           {result.duplicates.length > 0 && (
@@ -303,7 +311,7 @@ export default function ImportPage() {
               <h2>Duplicates (skipped — nothing was silently dropped)</h2>
               <div className="table-wrap">
                 <table className="data">
-                  <thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Matches</th><th></th></tr></thead>
+                  <thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Matches</th><th><span className="sr-only">Action</span></th></tr></thead>
                   <tbody>
                     {result.duplicates.map((d, i) => (
                       <tr key={i}>
@@ -314,7 +322,7 @@ export default function ImportPage() {
                             : <Link to={`/leads/${d.existing_id}`}>{d.existing_name}</Link>}
                         </td>
                         <td>{d.kind === 'in_db' && (
-                          <button className="btn small secondary" onClick={() => mergeNote(d)}>Add note to existing</button>
+                          <button type="button" className="btn small secondary" disabled={merging} onClick={() => mergeNote(d)}>Add note to existing</button>
                         )}</td>
                       </tr>
                     ))}
@@ -348,7 +356,7 @@ export default function ImportPage() {
           )}
 
           <div style={{ display: 'flex', gap: 10 }}>
-            <button className="btn" onClick={reset}>Import another file</button>
+            <button type="button" className="btn" onClick={reset}>Import another file</button>
             <Link className="btn secondary" to="/leads">View leads →</Link>
           </div>
         </>

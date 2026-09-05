@@ -50,6 +50,32 @@ test('Cold lead: imported, never contacted', () => {
   assert.equal(factors.days_since_last_call, null);
 });
 
+test('QA-11: failed dials never raise a score — only connected calls add engagement/recency', () => {
+  const lead = { source: 'website', stage: 'contacted' };
+  const untouched = calculateLeadScore(lead, [], NOW);
+  const spammed = calculateLeadScore(lead, [
+    { disposition: 'not_picked', called_at: at(0) },
+    { disposition: 'busy', called_at: at(0) },
+    { disposition: 'switched_off', called_at: at(1) },
+    { disposition: 'wrong_number', called_at: at(1) },
+    { disposition: 'not_picked', called_at: at(2) },
+  ], NOW);
+  assert.equal(spammed.score, untouched.score, 'five failed dials change nothing');
+  assert.equal(spammed.factors.engagement, 0);
+  assert.equal(spammed.factors.recency, 0, 'recency neutral: never connected');
+  assert.equal(spammed.factors.total_calls, 5);
+  assert.equal(spammed.factors.connected_calls, 0);
+  // A connect 40 days ago followed by a failed dial today stays cold: the
+  // failed dial does not refresh recency.
+  const stale = calculateLeadScore(lead, [
+    { disposition: 'connected', called_at: at(40) },
+    { disposition: 'not_picked', called_at: at(0) },
+  ], NOW);
+  assert.equal(stale.factors.recency, -20);
+  const fresh = calculateLeadScore(lead, [{ disposition: 'connected', called_at: at(0) }], NOW);
+  assert.ok(fresh.score > stale.score);
+});
+
 test('recency decay: same lead/calls score lower the older the last call', () => {
   const lead = { source: 'website', stage: 'contacted' };
   const recent = calculateLeadScore(lead, [{ disposition: 'connected', called_at: at(0) }], NOW).score;

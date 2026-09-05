@@ -21,22 +21,22 @@ export default class ErrorBoundary extends React.Component {
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <div className="card" style={{ maxWidth: 620, margin: '40px auto' }}>
+      <div className="card" style={{ maxWidth: 620, margin: '40px auto' }} role="alert">
         <h2 style={{ marginTop: 0 }}>Something went wrong on this screen</h2>
         <p style={{ color: 'var(--ink-soft)' }}>
           Your data is safe — this is only a display problem. Try another page from the
           menu, or reload the app.
         </p>
         <pre style={{
-          background: 'var(--bg-soft, #f6f6f8)', border: '1px solid var(--line, #e3e3ea)',
+          background: 'var(--bg-soft)', border: '1px solid var(--line)',
           borderRadius: 8, padding: 12, fontSize: 12, overflow: 'auto', whiteSpace: 'pre-wrap',
-          color: 'var(--red, #b91c1c)',
+          color: 'var(--red-text)',
         }}>
           {String((this.state.error && this.state.error.message) || this.state.error)}
         </pre>
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn" onClick={() => window.location.assign('/')}>Go to home</button>
-          <button className="btn secondary" onClick={() => window.location.reload()}>Reload app</button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <button type="button" className="btn" onClick={() => window.location.assign('/')}>Go to home</button>
+          <button type="button" className="btn secondary" onClick={() => window.location.reload()}>Reload app</button>
         </div>
       </div>
     );

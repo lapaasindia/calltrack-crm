@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api.js';
+import { Field } from '../components.jsx';
 
 // Shown when the logged-in account is flagged must_change_password (a fresh
 // bootstrap admin or an admin-reset account). The server blocks every other
@@ -14,6 +15,7 @@ export default function ForcePasswordChange({ onDone, onLogout }) {
 
   const submit = async (e) => {
     e.preventDefault();
+    if (busy) return;
     setError('');
     if (next !== confirm) { setError('New passwords do not match'); return; }
     setBusy(true);
@@ -32,25 +34,25 @@ export default function ForcePasswordChange({ onDone, onLogout }) {
       <form className="login-card" onSubmit={submit}>
         <div className="logo">Call<span>Track</span></div>
         <div className="tag">Set a new password to continue</div>
-        <div className="field">
-          <label>Current password</label>
+        <Field label="Current password">
           <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)}
             autoComplete="current-password" autoFocus />
-        </div>
-        <div className="field">
-          <label>New password</label>
+        </Field>
+        <Field label="New password" hint="At least 8 characters; not a common password">
           <input type="password" value={next} onChange={(e) => setNext(e.target.value)}
             autoComplete="new-password" placeholder="at least 8 characters" />
-        </div>
-        <div className="field">
-          <label>Confirm new password</label>
+        </Field>
+        <Field label="Confirm new password">
           <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)}
             autoComplete="new-password" />
-        </div>
-        {error && <div className="field"><div className="err">{error}</div></div>}
+        </Field>
+        {error && <div className="field"><div className="err" role="alert">{error}</div></div>}
         <button className="btn block" disabled={busy || !current || next.length < 8 || !confirm}>
           {busy ? 'Saving…' : 'Set new password'}
         </button>
+        <p style={{ fontSize: 12, color: 'var(--ink-soft)', textAlign: 'center', margin: '12px 0 0' }}>
+          Other browser tabs and paired phones will be signed out.
+        </p>
         <div style={{ textAlign: 'center', marginTop: 12 }}>
           <button type="button" className="linklike" onClick={onLogout}>Log out</button>
         </div>

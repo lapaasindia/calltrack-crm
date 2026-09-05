@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import db from '../db.js';
 import { isAdmin, isOwner, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { verifyMediaTicket } from '../lib/mediaTicket.js';
+import { destroySessionsForUser } from '../lib/sessionStore.js';
 
 export const hashToken = (token) =>
   crypto.createHash('sha256').update(token).digest('hex');
@@ -13,6 +14,22 @@ const USER_FIELDS = 'id, username, full_name, role, is_active, must_change_passw
 // `/api` mount where requireAuth runs (so e.g. `/review/audio/123`). Kept narrow
 // so a leaked ticket can never authenticate anything but the audio bytes.
 const AUDIO_TICKET_PATH = /^\/review\/audio\/\d+\/?$/;
+
+const LAST_SEEN_THROTTLE_MS = 60 * 1000;
+// Legacy tokens (paired before migration 014) have expires_at = NULL. Rather
+// than living forever they now expire 90 days after the later of paired_at /
+// last_seen_at — i.e. a 90-day inactivity window (audit SEC-15). New pairings
+// carry an explicit expires_at which wins.
+const LEGACY_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+export function deviceExpiryMs(device) {
+  if (device.expires_at) {
+    const t = Date.parse(device.expires_at);
+    if (Number.isFinite(t)) return t;
+  }
+  const paired = Date.parse(device.paired_at || '') || 0;
+  const seen = Date.parse(device.last_seen_at || '') || 0;
+  return Math.max(paired, seen) + LEGACY_TOKEN_TTL_MS;
+}
 
 // Attaches req.user from the session, or from a paired device's bearer token
 // (mobile app). 401 if neither is valid.
@@ -33,28 +50,36 @@ export function requireAuth(req, res, next) {
     req.mediaTicket = claims; // { userId, recordingId, exp } — route scopes to recordingId
     return next();
   }
-  // Paired-device auth normally comes from the Authorization header. Media URLs
-  // loaded by an <audio>/<img> tag can't set headers, so we also accept the
-  // token as a ?token= query param (LAN-only; lets the mobile app stream
-  // recordings). Session auth is unaffected.
-  const bearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1]
-    || (typeof req.query.token === 'string' ? req.query.token : undefined);
+  // Paired-device auth comes from the Authorization header. The legacy
+  // `?token=` query-param form is honoured ONLY on the audio GET route (older
+  // APKs stream recordings that way; <audio> tags can't set headers). It used
+  // to authenticate every route and method, which made a token that landed in
+  // a URL/log/history a full API credential (audit SEC-4). Everywhere else the
+  // header is required.
+  const headerBearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  const queryBearer = (!headerBearer && req.method === 'GET' && typeof req.query.token === 'string'
+      && AUDIO_TICKET_PATH.test(req.path)) ? req.query.token : undefined;
+  const bearer = headerBearer || queryBearer;
   if (bearer) {
     const device = db.prepare(
       'SELECT * FROM device_tokens WHERE token_hash = ? AND revoked_at IS NULL'
     ).get(hashToken(bearer));
     if (!device) return res.status(401).json({ error: 'Device not paired or revoked' });
-    // Token expiry (audit M-1): legacy tokens have NULL expires_at and stay
-    // valid; tokens minted after the hardening migration carry an expiry.
-    if (device.expires_at && device.expires_at < new Date().toISOString()) {
+    const nowMs = Date.now();
+    if (nowMs >= deviceExpiryMs(device)) {
       return res.status(401).json({ error: 'Device token expired — re-pair this phone' });
     }
     const user = db
       .prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`)
       .get(device.user_id);
     if (!user || !user.is_active) return res.status(401).json({ error: 'Account inactive' });
-    db.prepare('UPDATE device_tokens SET last_seen_at = ? WHERE id = ?')
-      .run(new Date().toISOString(), device.id);
+    // last_seen_at is a coarse "is this phone alive" signal; writing it on every
+    // poll was a needless write per request. At most once per 60 s per device.
+    const lastSeenMs = device.last_seen_at ? Date.parse(device.last_seen_at) : 0;
+    if (!(lastSeenMs > nowMs - LAST_SEEN_THROTTLE_MS)) {
+      db.prepare('UPDATE device_tokens SET last_seen_at = ? WHERE id = ?')
+        .run(new Date(nowMs).toISOString(), device.id);
+    }
     req.user = user;
     req.device = device;
     return next();
@@ -77,6 +102,9 @@ export function requireAuth(req, res, next) {
 // requireAuth so a still-default admin can't be used until rotated (audit H-1).
 export function requirePasswordChanged(req, res, next) {
   if (!req.user?.must_change_password) return next();
+  // A paired phone has no change-password UI; gating it would strand every
+  // sync call after an admin reset (audit SEC-16). The gate stays for sessions.
+  if (req.device) return next();
   const p = req.path;
   const allowed = (req.method === 'POST' && (p === '/auth/change-password' || p === '/auth/logout'))
     || (req.method === 'GET' && p === '/auth/me');
@@ -90,6 +118,29 @@ export function requirePasswordChanged(req, res, next) {
 export function requireDevice(req, res, next) {
   if (!req.device) return res.status(403).json({ error: 'Paired device required' });
   next();
+}
+
+// read_only may read but never write. Mount on a router (or a write route) so
+// every non-GET request from a read_only session is refused before the handler
+// runs — rather than trusting each handler to remember.
+export function requireWriter(req, res, next) {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  if (isReadOnly(req.user?.role)) return res.status(403).json({ error: 'Read-only account' });
+  next();
+}
+
+// Credential lifecycle (audit SEC-5): after a password change / admin reset /
+// deactivation, every OTHER credential the account holds must die — paired
+// device bearer tokens and browser sessions. `exceptSid` keeps the session that
+// performed a self-service change. Returns counts for the audit log.
+export function revokeUserCredentials(userId, { exceptSid = null } = {}) {
+  const now = new Date().toISOString();
+  const devices = db.prepare(
+    'UPDATE device_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL'
+  ).run(now, userId).changes;
+  let sessions = 0;
+  try { sessions = destroySessionsForUser(userId, exceptSid); } catch { /* best effort */ }
+  return { revoked_devices: devices, revoked_sessions: sessions };
 }
 
 // Team-management tier: super_admin | admin | manager (and legacy 'admin').

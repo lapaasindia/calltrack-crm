@@ -4,9 +4,15 @@ The WebView side (a **Chats** tab + an unread poll that fires a local
 notification) is already written in `mobile/www/app.js` / `style.css`, routed
 through a thin notification bridge in `mobile/www/native.js`
 (`Native.requestNotificationPermission()` + `Native.notify()`). It is
-**feature-gated**: the tab and the poll only appear when the server's
-`whatsapp_enabled` setting is on (the WebView reads `/api/whatsapp/unread`,
-which returns `{ enabled:false }` until the owner connects WhatsApp in Settings).
+**feature-gated**: the poll only runs when the server's `whatsapp_enabled`
+setting is on (the WebView reads `/api/whatsapp/unread`, which returns
+`{ enabled:false }` until the owner connects WhatsApp in Settings) **and only
+while the app is on screen** (the 30 s timer is torn down when the app goes to
+the background). The **Chats** tab itself is shown only to admin-tier phones
+(super_admin / admin / manager — the role is stored at pairing); every inbox
+route is admin-only on the server, so agents never see a tab that 403s. Agents
+still get the local notification for messages on their own leads. The unread
+count is shown as a badge on the tab.
 
 De-dupe: `Native.notify()` is keyed on the WhatsApp `wa_message` id (the `latest.id`
 from `/api/whatsapp/unread`), so the same inbound never raises two notifications,
@@ -25,8 +31,9 @@ Studio installed.
   `mobile/android/app/src/main/res/drawable/ic_stat_calltrack.xml` (white silhouette;
   swap for white PNGs in `drawable-*dpi/` if a specific OEM renders the vector poorly).
 - ✅ `capacitor.config.json` sets the notification `smallIcon` + `iconColor`.
-- ✅ WebView **Chats** tab + 30s `/api/whatsapp/unread` poll + `Native.notify()` bridge
-  (`mobile/www/app.js` / `native.js`), feature-gated on the server's `whatsapp_enabled`.
+- ✅ WebView **Chats** tab (admin-tier only) + 30s `/api/whatsapp/unread` poll while
+  visible + `Native.notify()` bridge (`mobile/www/app.js` / `native.js`), feature-gated
+  on the server's `whatsapp_enabled`.
 
 ## Remaining: sync + build (run at the REPO ROOT — not `mobile/`)
 The Capacitor project is rooted at the repo root (`capacitor.config.json` lives here),
@@ -60,8 +67,8 @@ npx cap sync android
 cd mobile/android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
 ```
 (There is no `mobile/www` build step — those are static files served straight into
-the WebView.) Bump the version in `mobile/android/app/build.gradle` if you're cutting
-a release APK, per the project's release ritual.
+the WebView.) The APK version comes from the root `package.json` (see
+ANDROID-APK.md) — bump that if you're cutting a release APK.
 Then on the device:
 1. Pair the phone to the LAN server as usual.
 2. In the **web** Settings (owner), connect WhatsApp and scan the QR with the

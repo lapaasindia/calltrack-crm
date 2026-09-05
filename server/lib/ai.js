@@ -9,6 +9,7 @@ import path from 'node:path';
 import db, { getSetting } from '../db.js';
 import { nowUtc, todayIst, addDays } from './istTime.js';
 import { RECORDINGS_BASE } from '../routes/sync.js';
+import { runJob, isShuttingDown } from './jobs.js';
 
 const execFileP = promisify(execFile);
 
@@ -298,17 +299,21 @@ export async function analyzeRecordingTranscript(recId, transcript, { extractFn 
   return ai;
 }
 
+// Tracked as a job so graceful shutdown waits for the recording in progress
+// (and no new one is picked up once draining starts).
 let running = false;
 export async function runAiQueueOnce() {
-  if (running || !aiEnabled()) return;
+  if (running || !aiEnabled() || isShuttingDown()) return;
   running = true;
   try {
-    let rec;
-    while ((rec = db.prepare(
-      "SELECT * FROM recordings WHERE ai_status = 'pending' ORDER BY created_at LIMIT 1"
-    ).get())) {
-      await processRecording(rec);
-    }
+    await runJob('ai-worker', async () => {
+      let rec;
+      while (!isShuttingDown() && (rec = db.prepare(
+        "SELECT * FROM recordings WHERE ai_status = 'pending' ORDER BY created_at LIMIT 1"
+      ).get())) {
+        await processRecording(rec);
+      }
+    });
   } finally {
     running = false;
   }

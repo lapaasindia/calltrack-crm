@@ -10,7 +10,7 @@
 // AGENT who made it (calls.user_id), join recordings→calls, and aggregate over
 // the recordings that have been analyzed (ai_json present).
 
-import { istDayBounds, istRangeBounds, addDays } from './istTime.js';
+import { istDayBounds, istRangeBounds, addDays, istDateOf, SQL_IST_DATE } from './istTime.js';
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
@@ -46,7 +46,7 @@ function analyzedCalls(db, userId, startUtc, endUtc) {
         AND c.source != 'whatsapp'
         AND c.called_at >= ? AND c.called_at < ?`
   ).all(userId, startUtc, endUtc);
-  return rows.map((row) => ({ disposition: row.disposition, ai: safeJson(row.ai_json) }))
+  return rows.map((row) => ({ disposition: row.disposition, called_at: row.called_at, ai: safeJson(row.ai_json) }))
     .filter((r) => r.ai && typeof r.ai === 'object');
 }
 
@@ -78,31 +78,37 @@ function tally(analyses, key) {
 }
 
 // 7-day overall-rating trend ending on dateIst (oldest → newest). Each entry is
-// { date, avg, calls } so the client can draw a sparkline.
+// { date, avg, calls } so the client can draw a sparkline. ONE query over the
+// 7-day window, bucketed by IST day in JS (was 7 queries; SCALE-15).
 function ratingTrend(db, userId, dateIst) {
-  const trend = [];
-  for (let i = 6; i >= 0; i -= 1) {
-    const d = addDays(dateIst, -i);
-    const { startUtc, endUtc } = istDayBounds(d);
-    const analyses = analyzedCalls(db, userId, startUtc, endUtc);
-    trend.push({ date: d, avg: avgAxis(analyses, 'overall'), calls: analyses.length });
+  const from = addDays(dateIst, -6);
+  const { startUtc, endUtc } = istRangeBounds(from, dateIst);
+  const byDay = new Map();
+  for (let i = 6; i >= 0; i -= 1) byDay.set(addDays(dateIst, -i), []);
+  for (const a of analyzedCalls(db, userId, startUtc, endUtc)) {
+    const day = istDateOf(a.called_at);
+    if (byDay.has(day)) byDay.get(day).push(a);
   }
-  return trend;
+  return [...byDay.entries()].map(([date, analyses]) => ({
+    date, avg: avgAxis(analyses, 'overall'), calls: analyses.length,
+  }));
 }
 
-// Consecutive IST days (ending at dateIst) with >=1 analyzed call. Walks back
-// until a gap; capped at 365 so a misconfigured date can't loop unbounded.
+// Consecutive IST days (ending at dateIst) with >=1 analyzed call. One query
+// for the distinct analyzed days in the last 365, then a walk back in memory
+// (was up to 365 COUNT queries per report card; SCALE-15).
 function currentStreak(db, userId, dateIst) {
+  const from = addDays(dateIst, -364);
+  const { startUtc, endUtc } = istRangeBounds(from, dateIst);
+  const days = new Set(db.prepare(
+    `SELECT DISTINCT ${SQL_IST_DATE('c.called_at')} AS d
+       FROM recordings r JOIN calls c ON c.id = r.call_id
+      WHERE c.user_id = ? AND r.ai_json IS NOT NULL AND c.source != 'whatsapp'
+        AND c.called_at >= ? AND c.called_at < ?`
+  ).all(userId, startUtc, endUtc).map((r) => r.d));
   let streak = 0;
   for (let i = 0; i < 365; i += 1) {
-    const d = addDays(dateIst, -i);
-    const { startUtc, endUtc } = istDayBounds(d);
-    const n = db.prepare(
-      `SELECT COUNT(*) AS n FROM recordings r JOIN calls c ON c.id = r.call_id
-        WHERE c.user_id = ? AND r.ai_json IS NOT NULL AND c.source != 'whatsapp'
-          AND c.called_at >= ? AND c.called_at < ?`
-    ).get(userId, startUtc, endUtc).n;
-    if (n > 0) streak += 1;
+    if (days.has(addDays(dateIst, -i))) streak += 1;
     else break;
   }
   return streak;

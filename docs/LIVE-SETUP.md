@@ -16,12 +16,12 @@ call recordings + invoices) is uploaded to *your own* Google Drive. If the offic
 stolen, you can restore everything. Google only ever sees scrambled files it cannot read.
 
 ### A. Create a free Google sign-in key (one time, ~5 min)
-1. Go to **console.cloud.google.com** and sign in with your Gmail (`lapaasindia@gmail.com`).
+1. Go to **console.cloud.google.com** and sign in with the Google account whose Drive should hold the backups (a company account, not a personal one).
 2. Top bar → **Select a project → New Project** → name it `CallTrack Backup` → **Create**.
 3. Left menu → **APIs & Services → Library** → search **Google Drive API** → **Enable**.
 4. **APIs & Services → OAuth consent screen** → choose **External** → fill App name (`CallTrack`),
    your support email, developer email → **Save and continue** through the steps. On **Test users**,
-   click **Add users** and add your Gmail. **Save**.
+   click **Add users** and add that same Google account. **Save**.
 5. **APIs & Services → Credentials → Create Credentials → OAuth client ID** →
    Application type **Desktop app** → name it → **Create**.
 6. A box shows a **Client ID** and **Client secret**. Copy both.

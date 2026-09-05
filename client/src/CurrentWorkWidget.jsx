@@ -1,25 +1,24 @@
 // Phase 4B — the floating "current work" widget, mounted globally in App.jsx.
 //
-// Polls GET /api/current-work every 15s for the user's active item (the
-// scheduled task / time block whose window contains now, ending soonest). A
-// separate 1s tick advances the elapsed-time display ONLY (no extra fetch).
-// Inline Start/Stop drives the SINGLE GLOBAL timer (taskTimer.js); Open jumps
-// to the task; the widget can be collapsed to a pill or dismissed for the day.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+// Polls GET /api/current-work every 60 s (only while the tab is visible) for
+// the user's active item (the scheduled task / time block whose window
+// contains now, ending soonest). A 1 s tick advances the elapsed-time display
+// ONLY while a timer is actually running. Inline Start/Stop drives the SINGLE
+// GLOBAL timer (taskTimer.js); Open jumps to the task; the widget can be
+// collapsed to a pill or dismissed for the day (per user).
+import React, { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from './api.js';
+import { api, istDateOf } from './api.js';
+import { useApp } from './ctx.js';
+import { usePolling, useTicker, useWindowEvent } from './hooks.js';
 import {
-  getActiveTimer, startTimer, stopTimer, elapsedSeconds, fmtDuration,
+  getActiveTimer, startTimer, stopTimer, elapsedSeconds, fmtDuration, dismissKey,
 } from './taskTimer.js';
 
-const DISMISS_KEY = 'crm_cw_dismissed_at'; // dismissed for the rest of the day
-
-function dismissedToday() {
+function dismissedToday(userId) {
   try {
-    const v = localStorage.getItem(DISMISS_KEY);
-    if (!v) return false;
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-    return v === today;
+    const v = localStorage.getItem(dismissKey(userId));
+    return !!v && v === istDateOf(new Date());
   } catch { return false; }
 }
 
@@ -30,50 +29,31 @@ function minsLeft(endIso) {
 
 export default function CurrentWorkWidget() {
   const navigate = useNavigate();
+  const { user, readOnly } = useApp();
   const [current, setCurrent] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
-  const [hidden, setHidden] = useState(dismissedToday());
-  const [active, setActive] = useState(getActiveTimer());
-  const [, setTick] = useState(0);
-  const aliveRef = useRef(true);
+  const [hidden, setHidden] = useState(() => dismissedToday(user.id));
+  const [active, setActive] = useState(() => getActiveTimer());
 
   const refresh = useCallback(() => {
-    api.get('/api/current-work')
-      .then((d) => { if (aliveRef.current) setCurrent(d.current); })
-      .catch(() => {});
+    api.get('/api/current-work').then((d) => setCurrent(d.current)).catch(() => {});
   }, []);
 
-  // ONE 15s poll for data + ONE 1s tick for the clock. Refresh on tab focus.
-  useEffect(() => {
-    aliveRef.current = true;
-    refresh();
-    const poll = setInterval(refresh, 15000);
-    const clock = setInterval(() => setTick((n) => n + 1), 1000);
-    const onVis = () => document.visibilityState === 'visible' && refresh();
-    const onTimer = () => setActive(getActiveTimer());
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('crm:timer', onTimer);
-    return () => {
-      aliveRef.current = false;
-      clearInterval(poll); clearInterval(clock);
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('crm:timer', onTimer);
-    };
-  }, [refresh]);
+  usePolling(refresh, 60000, [refresh], { enabled: !hidden });
+  useWindowEvent('crm:timer', () => setActive(getActiveTimer()));
+
+  const isTask = current && current.kind === 'task';
+  const isMeeting = current && current.kind === 'meeting';
+  const taskId = current ? (isTask ? current.id : current.linked_task_id) : null;
+  const isRunning = !!(active && taskId != null && active.taskId === taskId);
+  useTicker(isRunning && !hidden && !!current, 1000);
 
   if (hidden || !current) return null;
 
-  const isTask = current.kind === 'task';
-  const isMeeting = current.kind === 'meeting';
-  const taskId = isTask ? current.id : current.linked_task_id;
-  const isRunning = active && taskId != null && active.taskId === taskId;
   const liveExtra = isRunning ? elapsedSeconds(active) : 0;
 
   const dismiss = () => {
-    try {
-      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-      localStorage.setItem(DISMISS_KEY, today);
-    } catch { /* ignore */ }
+    try { localStorage.setItem(dismissKey(user.id), istDateOf(new Date())); } catch { /* ignore */ }
     setHidden(true);
   };
 
@@ -92,9 +72,9 @@ export default function CurrentWorkWidget() {
 
   if (collapsed) {
     return (
-      <button onClick={() => setCollapsed(false)} title="Current work"
+      <button type="button" onClick={() => setCollapsed(false)} title="Current work" aria-label="Show current work"
         style={{
-          position: 'fixed', right: 16, bottom: 16, zIndex: 200,
+          position: 'fixed', right: 16, bottom: 'calc(var(--nav-h) + var(--safe-bottom) + 12px)', zIndex: 90,
           background: 'var(--brand)', color: '#fff', border: 'none', borderRadius: 999,
           padding: '10px 14px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
           boxShadow: '0 6px 20px rgba(0,0,0,.18)',
@@ -105,8 +85,8 @@ export default function CurrentWorkWidget() {
   }
 
   return (
-    <div style={{
-      position: 'fixed', right: 16, bottom: 16, zIndex: 200, width: 280,
+    <div role="region" aria-label="Current work" style={{
+      position: 'fixed', right: 16, bottom: 'calc(var(--nav-h) + var(--safe-bottom) + 12px)', zIndex: 90, width: 280, maxWidth: 'calc(100vw - 32px)',
       background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 12,
       boxShadow: '0 8px 28px rgba(0,0,0,.16)', padding: 12,
     }}>
@@ -115,12 +95,12 @@ export default function CurrentWorkWidget() {
           {isTask ? '📋 Working now' : isMeeting ? '🤝 In meeting' : '🟧 Now'}
         </span>
         <span style={{ display: 'flex', gap: 2 }}>
-          <button className="btn small secondary" title="Collapse" onClick={() => setCollapsed(true)}>—</button>
-          <button className="btn small secondary" title="Dismiss for today" onClick={dismiss}>✕</button>
+          <button type="button" className="btn small secondary" title="Collapse" aria-label="Collapse" onClick={() => setCollapsed(true)}>—</button>
+          <button type="button" className="btn small secondary" title="Dismiss for today" aria-label="Dismiss for today" onClick={dismiss}>✕</button>
         </span>
       </div>
 
-      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>{current.title}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2, overflowWrap: 'anywhere' }}>{current.title}</div>
       <div className="tl-meta" style={{ marginBottom: 8 }}>
         {isTask
           ? <>{current.project_name ? `${current.project_name} · ` : ''}{minsLeft(current.end_at)}m left</>
@@ -130,20 +110,19 @@ export default function CurrentWorkWidget() {
       </div>
 
       {isRunning && (
-        <div style={{ fontSize: 13, color: 'var(--green)', fontWeight: 700, marginBottom: 8 }}>
+        <div style={{ fontSize: 13, color: 'var(--green-text)', fontWeight: 700, marginBottom: 8 }}>
           ● {fmtDuration(liveExtra, true)}
         </div>
       )}
 
       <div style={{ display: 'flex', gap: 6 }}>
-        {taskId != null && (
-          <button className={`btn small ${isRunning ? 'secondary' : ''}`}
-            style={isRunning ? { color: 'var(--red)' } : undefined}
+        {taskId != null && !readOnly && (
+          <button type="button" className={`btn small ${isRunning ? 'secondary danger-text' : ''}`}
             onClick={toggleTimer}>
             {isRunning ? '■ Stop' : '▶ Start'}
           </button>
         )}
-        <button className="btn small secondary" onClick={open}>Open</button>
+        <button type="button" className="btn small secondary" onClick={open}>Open</button>
       </div>
     </div>
   );

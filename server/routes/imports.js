@@ -1,11 +1,17 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { normalizePhone } from '../lib/phone.js';
 import { nowUtc } from '../lib/istTime.js';
+import { assignRoundRobin } from '../lib/assignment.js';
+import { recalcLeadScore } from '../lib/scoring.js';
 
 const router = Router();
 router.use(requireAdmin);
+// Imports are the one endpoint that legitimately carries a big JSON body
+// (20k mapped rows). Per-route limit (SCALE-24); no-op until app.js narrows
+// its global parser.
+router.use(express.json({ limit: '10mb' }));
 
 // The client parses CSV/XLSX and posts mapped rows; the server is the
 // authority on validation and dedupe (in-file AND against the DB).
@@ -23,16 +29,13 @@ router.post('/', (req, res) => {
 
   const defaultSource = String(req.body.default_source || 'import').trim() || 'import';
 
-  let assignees = [];
-  if (req.body.round_robin) {
-    assignees = db.prepare(
-      "SELECT id FROM users WHERE role = 'caller' AND is_active = 1 ORDER BY id"
-    ).all().map((u) => u.id);
-  } else if (req.body.assigned_to) {
+  let fixedAssignee = null;
+  const roundRobin = !!req.body.round_robin;
+  if (!roundRobin && req.body.assigned_to) {
     const u = db.prepare('SELECT id FROM users WHERE id = ? AND is_active = 1')
       .get(Number(req.body.assigned_to));
     if (!u) return res.status(400).json({ error: 'Invalid assignee' });
-    assignees = [u.id];
+    fixedAssignee = u.id;
   }
 
   const existsStmt = db.prepare(
@@ -55,9 +58,10 @@ router.post('/', (req, res) => {
     ).run(String(req.body.filename || 'upload'), req.body.preset || null, req.user.id, rows.length, nowUtc());
     const id = batchInfo.lastInsertRowid;
 
+    // Pass 1: validate + dedupe (in-file, then against the DB). Every row ends
+    // up in exactly one of accepted / duplicates / invalid — nothing is dropped.
     const seenInFile = new Map(); // phone -> row number
-    let assignIdx = 0;
-
+    const accepted = [];
     rows.forEach((row, idx) => {
       const rowNum = idx + 1;
       const name = String(row.name || '').trim();
@@ -86,18 +90,28 @@ router.post('/', (req, res) => {
         });
         return;
       }
-
       seenInFile.set(norm.phone, rowNum);
-      const assignedTo = assignees.length ? assignees[assignIdx++ % assignees.length] : null;
+      accepted.push({ row, name, phone: norm.phone });
+    });
+
+    // Pass 2: assign. Round-robin uses the shared persistent-cursor helper
+    // (agents AND callers, fair across batches — SCALE-20), sized to the rows
+    // that will actually be inserted.
+    const rrAssignees = roundRobin ? assignRoundRobin(db, accepted.length) : [];
+
+    accepted.forEach(({ row, name, phone }, i) => {
+      const assignedTo = roundRobin ? (rrAssignees[i] ?? null) : fixedAssignee;
       const now = nowUtc();
-      insertStmt.run(
-        name, norm.phone, String(row.phone ?? ''), row.alt_phone || null,
+      const ins = insertStmt.run(
+        name, phone, String(row.phone ?? ''), row.alt_phone || null,
         row.email || null, row.city || null,
         String(row.source || defaultSource).trim() || defaultSource,
         assignedTo, row.notes || null,
         row.extra && Object.keys(row.extra).length ? JSON.stringify(row.extra) : null,
         id, now, now
       );
+      // Initial score so imported leads are not NULL-scored (SCALE-10).
+      recalcLeadScore(db, ins.lastInsertRowid);
       imported++;
     });
 

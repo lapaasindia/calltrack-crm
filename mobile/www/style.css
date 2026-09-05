@@ -27,7 +27,8 @@ body {
   padding: 6px 11px; border-radius: 999px; display: flex; align-items: center; gap: 6px;
 }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-.dot.stale { background: var(--amber); } .dot.off { background: var(--red); }
+.dot.stale { background: var(--amber); } .dot.off { background: var(--red); } .dot.err { background: var(--red); }
+.sync-chip.err { color: var(--red); }
 
 .content { padding: 6px 14px 90px; }
 .card {
@@ -66,6 +67,8 @@ body {
   display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer;
 }
 .act.call { background: var(--green-bg); }
+/* EMU-14: the round call button is an <a>; never underline the emoji. */
+a.act, a.act:visited { text-decoration: none; color: inherit; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .badge.over { background: var(--red-bg); color: var(--red); }
@@ -98,6 +101,8 @@ input:focus, select:focus { outline: none; border-color: var(--brand); }
 
 .empty { text-align: center; color: var(--ink-faint); padding: 40px 16px; }
 .empty .big { font-size: 38px; margin-bottom: 8px; }
+.err-line { color: var(--red); font-size: 12.5px; margin-top: 6px; word-break: break-word; }
+.rec-player { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 
 .center-screen {
   min-height: 100vh; display: flex; flex-direction: column; justify-content: center;
@@ -125,6 +130,10 @@ input:focus, select:focus { outline: none; border-color: var(--brand); }
 .setup-step .n { width: 26px; height: 26px; border-radius: 50%; background: var(--surface2);
   display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
 .setup-step.done .n { background: var(--green); color: #06281d; }
+/* A step that does not apply on this phone (EMU-15): neutral, never blocks Done. */
+.setup-step.na { opacity: 0.7; }
+.setup-step.na .n { background: var(--surface2); color: var(--ink-faint); }
+.setup-step .t .na-note { color: var(--amber); }
 .setup-step .t { flex: 1; font-size: 14px; }
 .setup-step .t small { display: block; color: var(--ink-faint); font-size: 12px; margin-top: 2px; }
 

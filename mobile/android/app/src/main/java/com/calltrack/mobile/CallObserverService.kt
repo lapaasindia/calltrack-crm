@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.CallLog
 import androidx.core.app.NotificationCompat
 import androidx.work.BackoffPolicy
@@ -32,72 +33,78 @@ import java.util.concurrent.TimeUnit
  *
  * Debounced: OEM dialers write the call row, then patch duration/recording a
  * beat later, firing onChange 2-4 times per call. We coalesce into one sync.
+ *
+ * Starting a foreground service from the background throws on API 31+
+ * (ForegroundServiceStartNotAllowedException) unless the app is exempt from
+ * battery optimisation — every start is therefore guarded (MOB-7).
  */
 class CallObserverService : Service() {
 
-    private lateinit var observer: CallLogObserver
+    private var observer: CallLogObserver? = null
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
-        startInForeground()
-        observer = CallLogObserver(handler)
-        // notifyForDescendants=true: some OEMs notify on a child uri, not the
-        // base CONTENT_URI.
-        contentResolver.registerContentObserver(
-            CallLog.Calls.CONTENT_URI, true, observer
-        )
+        if (!startInForeground()) { stopSelf(); return }
+        observer = CallLogObserver(handler).also {
+            // notifyForDescendants=true: some OEMs notify on a child uri, not
+            // the base CONTENT_URI.
+            try { contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, it) }
+            catch (_: Exception) {}
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Re-assert foreground in case the system restarted us.
-        startInForeground()
+        if (!startInForeground()) { stopSelf(); return START_NOT_STICKY }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        try { contentResolver.unregisterContentObserver(observer) } catch (_: Exception) {}
+        observer?.let { try { contentResolver.unregisterContentObserver(it) } catch (_: Exception) {} }
         handler.removeCallbacksAndMessages(null)
+        try {
+            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE)
+            else @Suppress("DEPRECATION") stopForeground(true)
+        } catch (_: Exception) {}
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startInForeground() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= 26) {
-            val ch = NotificationChannel(
-                CHANNEL_ID, "Background call sync",
-                NotificationManager.IMPORTANCE_MIN
-            ).apply {
-                description = "Keeps your calls syncing to the office CRM"
-                setShowBadge(false)
+    /** False if the OS refused (background start not allowed) — caller stops the service. */
+    private fun startInForeground(): Boolean {
+        return try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= 26) {
+                val ch = NotificationChannel(CHANNEL_ID, "Background call sync", NotificationManager.IMPORTANCE_MIN).apply {
+                    description = "Keeps your calls syncing to the office CRM"
+                    setShowBadge(false)
+                }
+                nm.createNotificationChannel(ch)
             }
-            nm.createNotificationChannel(ch)
-        }
-        val tapIntent = packageManager.getLaunchIntentForPackage(packageName)?.let {
-            android.app.PendingIntent.getActivity(
-                this, 0, it,
-                android.app.PendingIntent.FLAG_IMMUTABLE or
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT
-            )
-        }
-        val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CallTrack is active")
-            .setContentText("Syncing your calls to the office CRM")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setContentIntent(tapIntent)
-            .build()
-
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(
-                NOTIF_ID, notif,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NOTIF_ID, notif)
+            val tapIntent = packageManager.getLaunchIntentForPackage(packageName)?.let {
+                android.app.PendingIntent.getActivity(
+                    this, 0, it,
+                    android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            }
+            val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("CallTrack is active")
+                .setContentText("Syncing your calls to the office CRM")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setContentIntent(tapIntent)
+                .build()
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIF_ID, notif)
+            }
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -126,31 +133,51 @@ class CallObserverService : Service() {
             SyncEngine.prefs(ctx).edit().putBoolean(PREF_ENABLED, enabled).apply()
         }
 
-        fun start(ctx: Context) {
+        /** Start (from a foreground context, e.g. the activity). Returns false if the OS refused. */
+        fun start(ctx: Context): Boolean {
             setEnabled(ctx, true)
             val i = Intent(ctx, CallObserverService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i)
-            else ctx.startService(i)
+            return try {
+                if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
+                true
+            } catch (_: Exception) { // ForegroundServiceStartNotAllowedException, IllegalStateException, SecurityException
+                false
+            }
+        }
+
+        /**
+         * Background entry points (App.onCreate, BootReceiver) may only start the
+         * FGS when the app is exempt from battery optimisation; otherwise the
+         * periodic WorkManager job is the fallback and the next app open starts
+         * the service from the foreground.
+         */
+        fun startIfAllowedInBackground(ctx: Context): Boolean {
+            if (!isEnabled(ctx)) return false
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+            if (!pm.isIgnoringBatteryOptimizations(ctx.packageName)) return false
+            return start(ctx)
         }
 
         fun stop(ctx: Context) {
             setEnabled(ctx, false)
-            ctx.stopService(Intent(ctx, CallObserverService::class.java))
+            try { ctx.stopService(Intent(ctx, CallObserverService::class.java)) } catch (_: Exception) {}
+            try {
+                (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID)
+            } catch (_: Exception) {}
         }
 
         /** Expedited one-time sync — runs within seconds, foreground quota. */
         fun enqueueExpeditedSync(ctx: Context) {
             if (SyncEngine.config(ctx) == null) return
             val req = OneTimeWorkRequestBuilder<SyncWorker>()
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED).build()
-                )
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
                 .build()
-            WorkManager.getInstance(ctx).enqueueUniqueWork(
-                EXPEDITED_WORK, ExistingWorkPolicy.REPLACE, req
+            // KEEP (MOB-12): never cancel an in-flight upload because another
+            // call ended; the running sync (or the periodic one) picks it up.
+            WorkManager.getInstance(ctx.applicationContext).enqueueUniqueWork(
+                EXPEDITED_WORK, ExistingWorkPolicy.KEEP, req
             )
         }
     }

@@ -245,6 +245,7 @@ test('captured call → one-tap create lead moves calls and recordings', async (
   const lead = await api(`/api/leads/${create.data.lead_id}`, { cookie: adminCookie });
   assert.equal(lead.data.name, 'New Prospect');
   assert.ok(lead.data.calls.length >= 2, 'all captured calls from this number moved');
+  assert.ok(Number.isInteger(lead.data.score), 'lead created from a capture is scored (SCALE-10)');
 
   // Re-syncing the original batch must STILL not duplicate (now as lead calls).
   const resync = await api('/api/sync/calls', { method: 'POST', token: deviceToken, body: BATCH });
@@ -346,7 +347,10 @@ test('repeat call on an existing lead\'s alt number attaches to it, no duplicate
 
 test('revoked device gets 401 immediately', async () => {
   const devices = await api('/api/devices', { cookie: adminCookie });
-  const dev = devices.data.find((d) => !d.revoked_at);
+  // The original 'Test Phone' (deviceToken) — last_seen_at is throttled to
+  // once per minute now, so "most recently seen" is no longer a safe pick.
+  const dev = devices.data.find((d) => !d.revoked_at && d.device_name === 'Test Phone');
+  assert.ok(dev, 'original device still listed as active');
   await api(`/api/devices/${dev.id}/revoke`, { method: 'POST', cookie: adminCookie });
   const res = await api('/api/sync/status', { token: deviceToken });
   assert.equal(res.status, 401);

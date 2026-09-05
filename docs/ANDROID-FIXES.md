@@ -1,5 +1,21 @@
 # CallTrack — Android App Fixes (build-ready)
 
+> **Status update (2026-09-05, v1.2.2):** the three sections below shipped in
+> 1.2.0/1.2.1 and were then re-audited on an API 34 emulator. The follow-up fixes
+> landed in the same files this guide describes — see `SyncEngine.kt` (watermark:
+> `pairedAt` set once at pairing, cursor moves only on server-accepted rows, ≤200-row
+> batches, run lock, streaming uploads with a sha256 `HEAD` pre-check, 80 MB cap,
+> "still being written" guard, per-file ledger, 401 → local disconnect),
+> `CallObserverService.kt` (guarded foreground starts, `KEEP` expedited policy, stop
+> removes the notification), `CallSyncPlugin.kt` (token in Keystore-backed
+> `EncryptedSharedPreferences`, `lastError`/`lastSuccessMs`/`pendingUploads`, SAF root
+> refused), `app.js` (errors surfaced, 401 → pairing screen, LAN-only pairing URL +
+> confirmation, ML Kit module install fixed, version from native) and
+> `mobile/run-e2e.sh` (emulator-only, second relaunch scenario). The `MANAGE_EXTERNAL_STORAGE`
+> / "all files" step, `READ_PHONE_STATE`, `REQUEST_INSTALL_PACKAGES`, the `FileProvider`,
+> the JitPack/google-services Gradle blocks and the JS `APP_VERSION` constant are gone.
+> Where the text below contradicts that, the code wins.
+
 Exact, build-ready changes for the three Android-app issues that **cannot be built or tested without Android Studio + a real device** (no Android SDK/emulator exists in the dev environment these were authored in). The code below was written against the project's *actual* current files, so it should drop in with minimal adjustment — but it has **not been compiler-checked**; build it, fix any IDE nits, and run the device checklists.
 
 ## Status of the 7 tester-reported issues

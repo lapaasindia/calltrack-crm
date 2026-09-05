@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, rupees } from '../api.js';
-import { useApp } from '../App.jsx';
+import { useApp } from '../ctx.js';
+import { useRequest, useSubmit } from '../hooks.js';
+import { isAdmin } from '../permissions.js';
+import { ErrorState, LoadingState, LeadPicker, Modal } from '../components.jsx';
 
 // Internal price builder. Reads the service catalog + pricing config and lets
 // any authed user assemble a quote: platform tier + weekly bandwidth + services
@@ -18,44 +21,50 @@ const TERMS = [
   ['annual', 'Annual', 12],
 ];
 
+function ToggleRow({ on, onToggle, children, price }) {
+  return (
+    <button type="button" className={`pb-toggle-row ${on ? 'on' : ''}`} aria-pressed={on} onClick={onToggle}>
+      <span className="pb-name"><span className="pb-check" aria-hidden="true">{on ? '✓' : ''}</span>{children}</span>
+      <span className="pb-price">{price}</span>
+    </button>
+  );
+}
+
 export default function PriceBuilder() {
-  const { showToast } = useApp();
+  const { user, showToast, canWrite } = useApp();
   const navigate = useNavigate();
-  const [catalog, setCatalog] = useState(null);
+  const admin = isAdmin(user.role);
   const [tierKey, setTierKey] = useState('');
   const [bandwidth, setBandwidth] = useState(0); // weekly hours
   const [svcOn, setSvcOn] = useState(() => new Set());
   const [addonOn, setAddonOn] = useState(() => new Set());
   const [term, setTerm] = useState('monthly');
-  const [leads, setLeads] = useState([]);
   const [leadId, setLeadId] = useState('');
+  const [copyFallback, setCopyFallback] = useState(null);
 
-  useEffect(() => {
-    api.get('/api/catalog').then((c) => {
-      setCatalog(c);
-      const tiers = c.pricing_config?.platform_tiers || [];
-      if (tiers.length) setTierKey(tiers[0].key);
-    }).catch(() => {});
-    // For optionally attaching the quote to a lead. Scoped server-side.
-    api.get('/api/leads').then((d) => setLeads(d.leads || [])).catch(() => {});
+  const { data: catalog, error, loading, reload } = useRequest(async ({ signal }) => {
+    const c = await api.get('/api/catalog', { signal });
+    const tiers = (c.pricing_config && c.pricing_config.platform_tiers) || [];
+    if (tiers.length) setTierKey((k) => k || tiers[0].key);
+    return c;
   }, []);
 
-  const cfg = catalog?.pricing_config;
+  const cfg = catalog && catalog.pricing_config;
   const activeServices = useMemo(
-    () => (catalog?.services || []).filter((s) => s.is_active),
+    () => ((catalog && catalog.services) || []).filter((s) => s.is_active),
     [catalog],
   );
   const activeAddons = useMemo(
-    () => (catalog?.addons || []).filter((a) => a.is_active),
+    () => ((catalog && catalog.addons) || []).filter((a) => a.is_active),
     [catalog],
   );
 
-  const tier = (cfg?.platform_tiers || []).find((t) => t.key === tierKey) || null;
-  const multiplier = cfg?.term_multipliers?.[term] ?? 1;
-  const bandwidthRate = cfg?.bandwidth_rate_paise ?? 0;
+  const tier = ((cfg && cfg.platform_tiers) || []).find((t) => t.key === tierKey) || null;
+  const multiplier = (cfg && cfg.term_multipliers && cfg.term_multipliers[term]) ?? 1;
+  const bandwidthRate = (cfg && cfg.bandwidth_rate_paise) ?? 0;
 
   // --- compute (all paise) ---
-  const platformPaise = tier?.price_paise || 0;
+  const platformPaise = (tier && tier.price_paise) || 0;
   const servicesPaise = activeServices
     .filter((s) => svcOn.has(s.id))
     .reduce((sum, s) => sum + s.base_price_paise, 0);
@@ -67,17 +76,16 @@ export default function PriceBuilder() {
 
   // Per-month price after the term discount, and the amount billed for the term.
   const monthlyPaise = Math.round(monthlyBasePaise * multiplier);
-  const months = TERMS.find((t) => t[0] === term)?.[2] || 1;
+  const months = (TERMS.find((t) => t[0] === term) || [])[2] || 1;
   const termTotalPaise = monthlyPaise * months;
 
   const toggle = (setter) => (id) => setter((prev) => {
     const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
+    if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
 
-  // Line items handed to the invoice flow (3B) / copied into the quote text.
-  // description + unit_price_paise are what POST /api/invoices expects.
+  // Line items handed to the invoice flow / copied into the quote text.
   // Each monthly line is billed `qty = months` times so the persisted subtotal
   // covers the FULL term (not a single month) — matching the on-screen total.
   const lineItems = () => {
@@ -97,7 +105,7 @@ export default function PriceBuilder() {
     return items;
   };
 
-  const termLabel = TERMS.find((t) => t[0] === term)?.[1];
+  const termLabel = (TERMS.find((t) => t[0] === term) || [])[1] || 'Monthly';
 
   const quoteText = () => {
     const lines = [];
@@ -124,20 +132,20 @@ export default function PriceBuilder() {
       await navigator.clipboard.writeText(text);
       showToast('Quote copied ✓');
     } catch {
-      // Clipboard API needs a secure context / permission; fall back to prompt.
-      window.prompt('Copy the quote below:', text);
+      // Clipboard API needs a secure context / permission; show it to copy by hand.
+      setCopyFallback(text);
     }
   };
 
-  // Turn the live quote into a persisted invoice (Phase 3B). Each toggled
-  // platform/bandwidth/service/add-on becomes a line item billed for the full
-  // term (qty = months); GST comes from settings server-side. A discounted
-  // billing term is reflected as a separate discount line scaled by `months`
-  // so the persisted subtotal equals the on-screen termTotal (full term, not
-  // one month): months*base + months*(perMonthAfterDiscount - base) = termTotal.
-  const createInvoice = async () => {
+  // Turn the live quote into a persisted invoice. A discounted billing term is
+  // reflected as a separate discount line scaled by `months` so the persisted
+  // subtotal equals the on-screen termTotal (full term, not one month).
+  const needsLead = !admin; // the server 403s lead-less invoices for non-admins (CLIENT-21)
+  const [createInvoice, creating] = useSubmit(async () => {
     const items = lineItems();
     if (!items.length) return showToast('Pick at least one item to invoice', 'error');
+    if (termTotalPaise <= 0) return showToast('The quote total is ₹0 — set prices in Settings → Catalog first', 'error');
+    if (needsLead && !leadId) return showToast('Pick the lead this invoice is for', 'error');
     if (multiplier !== 1) {
       const discountPaise = (monthlyPaise - monthlyBasePaise) * months; // negative, full term
       items.push({
@@ -154,39 +162,45 @@ export default function PriceBuilder() {
     try {
       const res = await api.post('/api/invoices', payload);
       showToast('Invoice created ✓');
-      if (res?.id) navigate(`/invoices/${res.id}`);
+      if (res && res.id) navigate(`/invoices/${res.id}`);
     } catch (err) {
       showToast(err.message, 'error');
     }
-  };
+    return undefined;
+  });
 
-  if (!catalog) return <div className="card empty"><div className="big">🧮</div>Loading catalog…</div>;
+  if (!catalog) {
+    if (error) return <><div className="page-title"><h1>Price builder</h1></div><ErrorState error={error} onRetry={reload} title="Couldn't load the catalog" /></>;
+    return loading ? <LoadingState label="Loading catalog…" /> : null;
+  }
+
+  const tiers = (cfg && cfg.platform_tiers) || [];
 
   return (
     <>
       <div className="page-title"><h1>Price builder</h1></div>
+      {error && <ErrorState error={error} onRetry={reload} compact />}
 
       <div className="pb-grid">
         <div>
           {/* Platform tier */}
           <div className="card">
             <h2>Platform tier</h2>
-            {(cfg?.platform_tiers || []).length === 0 && (
+            {tiers.length === 0 && (
               <div className="hint">No platform tiers configured yet (Settings → Catalog).</div>
             )}
-            {(cfg?.platform_tiers || []).map((t) => (
-              <div key={t.key} className={`pb-toggle-row ${tierKey === t.key ? 'on' : ''}`}
-                onClick={() => setTierKey(t.key)}>
-                <span className="pb-name">{t.name}</span>
-                <span className="pb-price">{rupees(t.price_paise)}/mo</span>
-              </div>
+            {tiers.map((t) => (
+              <ToggleRow key={t.key} on={tierKey === t.key} onToggle={() => setTierKey(t.key)} price={`${rupees(t.price_paise)}/mo`}>
+                {t.name}
+              </ToggleRow>
             ))}
           </div>
 
           {/* Bandwidth */}
           <div className="card">
             <h2>Weekly bandwidth</h2>
-            <input type="range" min="0" max="40" step="1" value={bandwidth}
+            <label htmlFor="pb-bandwidth" className="sr-only">Weekly hours</label>
+            <input id="pb-bandwidth" type="range" min="0" max="40" step="1" value={bandwidth}
               onChange={(e) => setBandwidth(Number(e.target.value))} style={{ width: '100%' }} />
             <div className="pb-line">
               <span>{bandwidth} hrs/week</span>
@@ -200,14 +214,9 @@ export default function PriceBuilder() {
             <h2>Services</h2>
             {activeServices.length === 0 && <div className="hint">No active services.</div>}
             {activeServices.map((s) => (
-              <div key={s.id} className={`pb-toggle-row ${svcOn.has(s.id) ? 'on' : ''}`}
-                onClick={() => toggle(setSvcOn)(s.id)}>
-                <span className="pb-name">
-                  <input type="checkbox" checked={svcOn.has(s.id)} readOnly style={{ marginRight: 8 }} />
-                  {s.name}{s.category ? <span className="pb-price"> · {s.category}</span> : ''}
-                </span>
-                <span className="pb-price">{rupees(s.base_price_paise)}/mo</span>
-              </div>
+              <ToggleRow key={s.id} on={svcOn.has(s.id)} onToggle={() => toggle(setSvcOn)(s.id)} price={`${rupees(s.base_price_paise)}/mo`}>
+                {s.name}{s.category ? <span className="pb-price"> · {s.category}</span> : ''}
+              </ToggleRow>
             ))}
           </div>
 
@@ -216,14 +225,9 @@ export default function PriceBuilder() {
             <h2>Add-ons</h2>
             {activeAddons.length === 0 && <div className="hint">No active add-ons.</div>}
             {activeAddons.map((a) => (
-              <div key={a.id} className={`pb-toggle-row ${addonOn.has(a.id) ? 'on' : ''}`}
-                onClick={() => toggle(setAddonOn)(a.id)}>
-                <span className="pb-name">
-                  <input type="checkbox" checked={addonOn.has(a.id)} readOnly style={{ marginRight: 8 }} />
-                  {a.icon ? `${a.icon} ` : ''}{a.name}
-                </span>
-                <span className="pb-price">{rupees(a.price_paise)}/mo</span>
-              </div>
+              <ToggleRow key={a.id} on={addonOn.has(a.id)} onToggle={() => toggle(setAddonOn)(a.id)} price={`${rupees(a.price_paise)}/mo`}>
+                {a.icon ? `${a.icon} ` : ''}{a.name}
+              </ToggleRow>
             ))}
           </div>
         </div>
@@ -233,9 +237,9 @@ export default function PriceBuilder() {
           <h2 style={{ marginTop: 0 }}>Quote</h2>
           <div className="field">
             <label>Billing term</label>
-            <div className="seg">
+            <div className="seg" role="group" aria-label="Billing term">
               {TERMS.map(([key, label]) => (
-                <button key={key} type="button" className={term === key ? 'on' : ''}
+                <button key={key} type="button" className={term === key ? 'on' : ''} aria-pressed={term === key}
                   onClick={() => setTerm(key)}>{label}</button>
               ))}
             </div>
@@ -248,7 +252,7 @@ export default function PriceBuilder() {
           {multiplier !== 1 && (
             <div className="pb-line">
               <span>{termLabel} discount</span>
-              <b style={{ color: 'var(--green)' }}>−{Math.round((1 - multiplier) * 100)}%</b>
+              <b style={{ color: 'var(--green-text)' }}>−{Math.round((1 - multiplier) * 100)}%</b>
             </div>
           )}
 
@@ -260,19 +264,33 @@ export default function PriceBuilder() {
           </div>
 
           <div className="field" style={{ marginTop: 12 }}>
-            <label>Attach to lead (optional)</label>
-            <select value={leadId} onChange={(e) => setLeadId(e.target.value)}>
-              <option value="">No lead</option>
-              {leads.map((l) => <option key={l.id} value={l.id}>{l.name} · {l.phone}</option>)}
-            </select>
+            <label htmlFor="pb-lead">{needsLead ? 'Lead (required for the invoice)' : 'Attach to lead (optional)'}</label>
+            <LeadPicker id="pb-lead" value={leadId} allowNone={!needsLead} onChange={(id) => setLeadId(id)} />
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button className="btn secondary" style={{ flex: 1 }} onClick={copyQuote}>Copy quote</button>
-            <button className="btn" style={{ flex: 1 }} onClick={createInvoice}>Create invoice</button>
+            <button type="button" className="btn secondary" style={{ flex: 1 }} onClick={copyQuote}>Copy quote</button>
+            {canWrite && (
+              <button type="button" className="btn" style={{ flex: 1 }}
+                disabled={creating || termTotalPaise <= 0 || (needsLead && !leadId)} onClick={createInvoice}>
+                {creating ? 'Creating…' : 'Create invoice'}
+              </button>
+            )}
           </div>
+          {termTotalPaise <= 0 && <div className="hint" style={{ marginTop: 6 }}>Nothing priced yet — an invoice needs a total above ₹0.</div>}
         </div>
       </div>
+
+      {copyFallback && (
+        <Modal title="Copy the quote" onClose={() => setCopyFallback(null)}>
+          <p className="modal-message">Your browser blocked automatic copying. Select the text below and copy it.</p>
+          <textarea readOnly rows={10} value={copyFallback} onFocus={(e) => e.target.select()} autoFocus
+            style={{ width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: 13, padding: 10, borderRadius: 8, border: '1px solid var(--line)' }} />
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={() => setCopyFallback(null)}>Done</button>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }

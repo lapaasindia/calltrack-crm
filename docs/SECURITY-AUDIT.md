@@ -1,5 +1,11 @@
 # Security Audit — CallTrack CRM (calltrack-crm v1.2.0)
 
+> **Historical document.** This is the June 2026 audit of **v1.2.0** as it was
+> written; file:line references and version claims describe that tree, not the
+> current code. What was fixed, what was corrected later, and the September 2026
+> re-audit (SEC-1 … SEC-16) live in [SECURITY-REMEDIATION.md](SECURITY-REMEDIATION.md).
+> How to report a new issue: [SECURITY.md](../SECURITY.md).
+
 > Date: 2026-06-17 · Scope: full-stack (Node/Express backend, React SPA, Electron
 > desktop wrapper, Capacitor Android app, Baileys WhatsApp, Google Drive backups,
 > Sarvam/Ollama AI). Each finding was validated by multiple independent adversarial

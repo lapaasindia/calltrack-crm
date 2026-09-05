@@ -17,18 +17,25 @@
 //
 // The Drive client is INJECTABLE (the `drive` arg) so unit tests run the whole
 // pipeline with a fake uploader and never touch the network.
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import db, { DATA_DIR, getSetting, setSetting } from '../db.js';
 import { todayIst, nowUtc } from './istTime.js';
 import { runBackup, BACKUP_DIR } from './backup.js';
-import { encryptFile } from './cryptoBackup.js';
+import { encryptFileAsync, sha256FileAsync } from './cryptoBackup.js';
 import { sendNotification } from './notify.js';
 import { logAudit } from './audit.js';
 import * as drive from './googleDrive.js';
 import { openSecret } from './secretBox.js';
+import { runJob, isShuttingDown } from './jobs.js';
+import { log } from './logger.js';
+
+const clog = log.child({ mod: 'cloud-backup' });
+// Give the event loop a turn between files so a 10k-recording first run never
+// starves requests (each file's hash/encrypt/upload is already async+streamed;
+// this bounds the synchronous bookkeeping between them). SCALE-4.
+const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
 
 export const DRIVE_FOLDER_NAME = 'CallTrack Backups';
 const DB_SNAPSHOT_KEEP = 30;
@@ -100,12 +107,6 @@ export function buildUploadSet({ dataDir = DATA_DIR, backupDir = BACKUP_DIR } = 
   return set;
 }
 
-function sha256File(abs) {
-  const hash = crypto.createHash('sha256');
-  hash.update(fs.readFileSync(abs));
-  return hash.digest('hex');
-}
-
 // Drive object name for an encrypted file: flatten the source path so it's a
 // single legible filename in the Drive folder, suffixed .enc. Ledger keys on
 // (source_path, sha256), so collisions are impossible to confuse.
@@ -154,7 +155,11 @@ async function getAccessToken(cfg, driveClient) {
 // Core. Returns a result object also persisted to last_cloud_backup.
 // Options let tests inject a fake drive client + an explicit passphrase and
 // skip the owner-notification side effects.
-export async function runCloudBackup({
+export async function runCloudBackup(opts = {}) {
+  return runJob('cloud-backup', () => doCloudBackup(opts));
+}
+
+async function doCloudBackup({
   drive: driveClient = drive,
   passphrase,
   dataDir = DATA_DIR,
@@ -170,8 +175,10 @@ export async function runCloudBackup({
     return { ok: false, skipped: true, reason: 'no_passphrase' };
   }
 
-  // Ensure today's local VACUUM snapshot exists before we pick the upload set.
-  try { runBackup(); } catch { /* if VACUUM fails we still try existing files */ }
+  // Ensure today's local snapshot exists before we pick the upload set. A
+  // snapshot is only ever renamed into place after verification, so whatever
+  // buildUploadSet finds is consistent.
+  try { await runBackup(); } catch (err) { clog.warn({ err }, 'local snapshot failed; uploading existing files'); }
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ctbkp-'));
   const get = ledgerGet();
@@ -187,13 +194,14 @@ export async function runCloudBackup({
 
     const set = buildUploadSet({ dataDir, backupDir });
     for (const item of set) {
-      const sha = sha256File(item.abs);
+      if (isShuttingDown()) throw new Error('Server is shutting down — cloud backup paused (resumes next run)');
+      const sha = await sha256FileAsync(item.abs);
       const existing = get.get(item.source_path, sha);
       if (existing && existing.drive_file_id) { skipped++; continue; } // already uploaded
 
       const tmpEnc = path.join(tmpRoot, driveNameFor(item.source_path));
       fs.mkdirSync(path.dirname(tmpEnc), { recursive: true });
-      const { bytes } = encryptFile(item.abs, tmpEnc, pass);
+      const { bytes } = await encryptFileAsync(item.abs, tmpEnc, pass);
 
       const driveFile = await driveClient.uploadFile(accessToken, {
         folderId,
@@ -204,6 +212,7 @@ export async function runCloudBackup({
       fs.rmSync(tmpEnc, { force: true });
       uploaded++;
       totalBytes += bytes;
+      await yieldToLoop();
     }
 
     // Retention: keep newest DB_SNAPSHOT_KEEP daily DB snapshots in Drive.
@@ -288,6 +297,7 @@ export function getInMemoryPassphrase() {
 export function startCloudBackupScheduler() {
   const tick = async () => {
     try {
+      if (isShuttingDown()) return;
       if (!driveConnected() || !hasPassphrase()) return;
       const pass = getInMemoryPassphrase();
       if (!pass) return; // can't decrypt without it; wait for operator/env.
@@ -295,7 +305,7 @@ export function startCloudBackupScheduler() {
       if (last && last.ok && last.date === todayIst()) return; // already done today
       await runCloudBackup({ passphrase: pass });
     } catch (err) {
-      console.error('[cloud-backup] tick failed:', err.message);
+      clog.error({ err }, 'tick failed');
     }
   };
   // First check a minute after boot (after the local backup scheduler's tick),

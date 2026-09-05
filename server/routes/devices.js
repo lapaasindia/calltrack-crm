@@ -5,6 +5,7 @@ import db from '../db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { isOwner } from '../lib/permissions.js';
 import { nowUtc } from '../lib/istTime.js';
+import { tlsConfig } from '../app.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -21,7 +22,14 @@ function makeCode() {
 // phones can't resolve). We list every non-internal IPv4, putting the host IP
 // on the same /24 as the requesting admin first so a phone on the office WiFi
 // gets a directly-reachable address.
+// The scheme the phone must use: https when this connection is TLS or TLS is
+// configured (CRM_TLS_CERT/KEY — MOB-9); a hard-coded http:// QR could never
+// pair against a TLS server.
+function schemeOf(req) {
+  return (req.secure || !!tlsConfig()) ? 'https' : 'http';
+}
 function lanUrls(req) {
+  const scheme = schemeOf(req);
   const port = (req.headers.host || '').split(':')[1] || req.socket.localPort || 3000;
   const ips = [];
   for (const ifaces of Object.values(os.networkInterfaces())) {
@@ -32,7 +40,7 @@ function lanUrls(req) {
   const clientNet = String(req.ip || '').replace(/^::ffff:/, '').split('.').slice(0, 3).join('.');
   const net = (ip) => ip.split('.').slice(0, 3).join('.');
   ips.sort((a, b) => Number(net(b) === clientNet) - Number(net(a) === clientNet));
-  return ips.map((ip) => `http://${ip}:${port}`);
+  return ips.map((ip) => `${scheme}://${ip}:${port}`);
 }
 
 router.post('/pairing-code', (req, res) => {
@@ -51,7 +59,7 @@ router.post('/pairing-code', (req, res) => {
   db.prepare(
     'INSERT INTO pairing_codes (code, user_id, created_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(code, user.id, req.user.id, expiresAt, nowUtc());
-  res.json({ code, expires_at: expiresAt, urls: lanUrls(req) });
+  res.json({ code, expires_at: expiresAt, urls: lanUrls(req), scheme: schemeOf(req) });
 });
 
 router.get('/', (req, res) => {

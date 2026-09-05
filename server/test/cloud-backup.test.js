@@ -65,6 +65,127 @@ test('deriveVerifier detects a wrong passphrase without storing it', () => {
   assert.ok(!crypto.verifierMatches('pass-two', salt, verifier));
 });
 
+// ── SCALE-4: streaming / async variants are byte-compatible with the sync ones ──
+test('encryptFileAsync output decrypts with the sync decryptFile (same on-disk format), and vice versa', async () => {
+  const data = Buffer.concat([Buffer.from('streaming ✓ '), Buffer.alloc(300 * 1024, 7), Buffer.from('end')]);
+  const src = path.join(TMP, 'async.bin');
+  fs.writeFileSync(src, data);
+
+  const encA = path.join(TMP, 'async.enc');
+  const { bytes } = await crypto.encryptFileAsync(src, encA, 'stream-pass');
+  assert.equal(bytes, fs.statSync(encA).size);
+  assert.equal(bytes, data.length + 53, 'header(53) + ciphertext, no expansion');
+  const blob = fs.readFileSync(encA);
+  assert.equal(blob.subarray(0, 5).toString('latin1'), 'CTBKP');
+  assert.ok(!blob.subarray(37, 53).equals(Buffer.alloc(16)), 'GCM tag patched into the header');
+  const outSync = path.join(TMP, 'async.sync.out');
+  crypto.decryptFile(encA, outSync, 'stream-pass');
+  assert.deepEqual(fs.readFileSync(outSync), data, 'sync decrypt reads the streamed file');
+  const outAsync = path.join(TMP, 'async.async.out');
+  await crypto.decryptFileAsync(encA, outAsync, 'stream-pass');
+  assert.deepEqual(fs.readFileSync(outAsync), data, 'async decrypt reads the streamed file');
+
+  const encS = path.join(TMP, 'sync.enc');
+  crypto.encryptFile(src, encS, 'stream-pass');
+  const outCross = path.join(TMP, 'sync.async.out');
+  await crypto.decryptFileAsync(encS, outCross, 'stream-pass');
+  assert.deepEqual(fs.readFileSync(outCross), data, 'async decrypt reads a sync-encrypted file');
+
+  // Wrong passphrase rejects and leaves no partial output.
+  const bad = path.join(TMP, 'bad.out');
+  await assert.rejects(() => crypto.decryptFileAsync(encA, bad, 'nope'), /authenticate|Unsupported state/i);
+  assert.ok(!fs.existsSync(bad), 'partial plaintext removed');
+  await assert.rejects(() => crypto.encryptFileAsync(src, path.join(TMP, 'x.enc'), ''), /Passphrase required/);
+
+  // Streaming sha256 == one-shot sha256.
+  const nodeCrypto = await import('node:crypto');
+  const expected = nodeCrypto.createHash('sha256').update(data).digest('hex');
+  assert.equal(await crypto.sha256FileAsync(src), expected);
+});
+
+test('runBackup: async, verified, tmp-then-rename, keeps naming + last_backup shape', async () => {
+  const backup = await import('../lib/backup.js');
+  const p = backup.runBackup();
+  assert.ok(typeof p.then === 'function', 'returns a promise');
+  assert.strictEqual(backup.runBackup(), p, 'concurrent callers share the in-flight run');
+  const file = await p;
+  assert.match(path.basename(file), /^crm-\d{4}-\d{2}-\d{2}\.sqlite$/);
+  assert.ok(fs.existsSync(file));
+  assert.ok(!fs.existsSync(`${file}.tmp`), 'no temp file left behind');
+  const { getSetting } = await import('../db.js');
+  const last = getSetting('last_backup');
+  assert.equal(last.file, file);
+  assert.match(last.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(last.at && last.bytes > 0 && typeof last.ms === 'number');
+  // The snapshot is a real, self-contained, consistent database.
+  const info = backup.verifyBackupFile(file);
+  assert.ok(info.bytes > 0 && info.user_version >= 17);
+  const Database = (await import('better-sqlite3')).default;
+  const copy = new Database(file, { readonly: true });
+  assert.equal(copy.pragma('quick_check', { simple: true }), 'ok');
+  assert.equal(copy.pragma('journal_mode', { simple: true }), 'delete');
+  // Full schema present (this test file never bootstraps, so no users row).
+  assert.ok(copy.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('users','leads','payments','schema_migrations')").get().n === 4);
+  assert.equal(copy.pragma('user_version', { simple: true }), info.user_version);
+  copy.close();
+  // A torn/garbage file never gets the real name: verify rejects it.
+  const junk = path.join(TMP, 'junk.sqlite');
+  fs.writeFileSync(junk, 'not a database at all');
+  assert.throws(() => backup.verifyBackupFile(junk));
+  // Second run the same day replaces the file in place (same name).
+  const again = await backup.runBackup();
+  assert.equal(again, file);
+});
+
+test('googleDrive.uploadFile streams from disk with an exact Content-Length; downloadFile streams to disk', async () => {
+  const http = await import('node:http');
+  const drive = await import('../lib/googleDrive.js');
+  const payload = Buffer.concat([Buffer.from('CTBKP-fake-ciphertext-'), Buffer.alloc(200 * 1024, 42)]);
+  const src = path.join(TMP, 'upload.enc');
+  fs.writeFileSync(src, payload);
+  let seen = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      if (req.url.startsWith('/upload/drive/v3/files')) {
+        seen = { headers: req.headers, body, url: req.url };
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ id: 'fake-id', name: 'x.enc', size: String(body.length) }));
+      } else if (req.url.startsWith('/drive/v3/files/dl-1')) {
+        res.end(payload);
+      } else {
+        res.statusCode = 404; res.end('{}');
+      }
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  process.env.CRM_DRIVE_UPLOAD_BASE = `${base}/upload/drive/v3`;
+  process.env.CRM_DRIVE_API_BASE = `${base}/drive/v3`;
+  try {
+    const out = await drive.uploadFile('tok', { folderId: 'f1', name: 'x.enc', srcAbs: src });
+    assert.equal(out.id, 'fake-id');
+    assert.equal(seen.headers.authorization, 'Bearer tok');
+    assert.match(seen.headers['content-type'], /^multipart\/related; boundary=/);
+    assert.equal(seen.headers['transfer-encoding'], undefined, 'not chunked');
+    assert.equal(Number(seen.headers['content-length']), seen.body.length, 'exact Content-Length');
+    assert.ok(seen.body.includes(payload), 'file bytes present verbatim');
+    assert.ok(seen.body.includes(Buffer.from('"parents":["f1"]')), 'metadata part present');
+    assert.match(seen.url, /uploadType=multipart/);
+
+    const dest = path.join(TMP, 'dl', 'nested', 'file.enc');
+    const n = await drive.downloadFile('tok', 'dl-1', dest);
+    assert.equal(n, payload.length);
+    assert.deepEqual(fs.readFileSync(dest), payload);
+  } finally {
+    delete process.env.CRM_DRIVE_UPLOAD_BASE;
+    delete process.env.CRM_DRIVE_API_BASE;
+    server.close();
+  }
+});
+
 // ── file selection (include / exclude) ───────────────────────────────────────
 // Uses ISOLATED dirs (NOT the live CRM_DATA_DIR) so we can drop a junk file
 // literally named crm.sqlite without clobbering the real database connection.

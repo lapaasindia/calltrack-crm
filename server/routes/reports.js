@@ -4,9 +4,21 @@ import { requireAdmin } from '../middleware/auth.js';
 import {
   todayIst, istDayBounds, istRangeBounds, istWeekRange, istMonthRange, addDays, SQL_IST_DATE,
 } from '../lib/istTime.js';
+import { loadOpenInstallments } from '../lib/installmentDues.js';
+import { RR_ROLES } from '../lib/assignment.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Who competes on the leaderboard: the round-robin calling roles (shared with
+// lib/assignment.js) plus employees. Was the literal 'caller', which made every
+// agent/employee invisible (SCALE-9).
+const LEADERBOARD_ROLES = [...new Set([...RR_ROLES, 'employee'])];
+
+// Exact rupees from integer paise (2 decimals) — SQLite's `/ 100` on integers
+// truncates, and README promises exact money (SCALE-21). Paise fields are
+// returned alongside so clients can format precisely.
+const rupees = (paise) => Math.round(Number(paise) || 0) / 100;
 
 function dateRange(req) {
   const today = todayIst();
@@ -74,9 +86,9 @@ router.get('/leaderboard', (req, res) => {
        SELECT id FROM targets WHERE user_id = u.id AND effective_from <= ?
        ORDER BY effective_from DESC LIMIT 1
      )
-     WHERE u.is_active = 1 AND u.role = 'caller'
+     WHERE u.is_active = 1 AND u.role IN (${LEADERBOARD_ROLES.map(() => '?').join(',')})
      ORDER BY dials DESC, connects DESC`
-  ).all(startUtc, endUtc, from, to, from, to, to);
+  ).all(startUtc, endUtc, from, to, from, to, to, ...LEADERBOARD_ROLES);
 
   // Targets are daily — scale to the period length for week/month views.
   const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
@@ -121,14 +133,16 @@ router.get('/agent-daily', (req, res) => {
   for (const r of rows) {
     const d = dealMap.get(`${r.day}|${r.agent}`);
     r.deals = d?.deals || 0;
-    r.deal_value_rupees = d ? Math.round(d.deal_value_paise / 100) : 0;
+    r.deal_value_paise = d ? d.deal_value_paise : 0;
+    r.deal_value_rupees = rupees(r.deal_value_paise);
     dealMap.delete(`${r.day}|${r.agent}`);
   }
   // Days where an agent won a deal but made no logged calls still appear.
   for (const d of dealMap.values()) {
     rows.push({
       day: d.day, agent: d.agent, dials: 0, connects: 0, unique_leads: 0,
-      connect_rate_pct: 0, deals: d.deals, deal_value_rupees: Math.round(d.deal_value_paise / 100),
+      connect_rate_pct: 0, deals: d.deals, deal_value_paise: d.deal_value_paise,
+      deal_value_rupees: rupees(d.deal_value_paise),
     });
   }
   rows.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : b.dials - a.dials));
@@ -164,17 +178,23 @@ router.get('/revenue-by-product', (req, res) => {
   const rows = db.prepare(
     `SELECT pr.name AS product,
        COUNT(DISTINCT d.id) AS deals,
-       COALESCE(SUM(d.deal_value_paise), 0) / 100 AS deal_value_rupees,
+       COALESCE(SUM(d.deal_value_paise), 0) AS deal_value_paise,
+       ROUND(COALESCE(SUM(d.deal_value_paise), 0) / 100.0, 2) AS deal_value_rupees,
        COALESCE((
          SELECT SUM(p.amount_paise) FROM payments p
          JOIN deals d2 ON d2.id = p.deal_id
          WHERE d2.product_id = pr.id AND p.received_date >= ? AND p.received_date <= ?
-       ), 0) / 100 AS collected_rupees
+       ), 0) AS collected_paise,
+       ROUND(COALESCE((
+         SELECT SUM(p.amount_paise) FROM payments p
+         JOIN deals d2 ON d2.id = p.deal_id
+         WHERE d2.product_id = pr.id AND p.received_date >= ? AND p.received_date <= ?
+       ), 0) / 100.0, 2) AS collected_rupees
      FROM products pr
      LEFT JOIN deals d ON d.product_id = pr.id AND d.won_date >= ? AND d.won_date <= ? AND d.status != 'cancelled'
-     GROUP BY pr.id HAVING deals > 0 OR collected_rupees > 0
-     ORDER BY collected_rupees DESC`
-  ).all(from, to, from, to);
+     GROUP BY pr.id HAVING deals > 0 OR collected_paise > 0
+     ORDER BY collected_paise DESC`
+  ).all(from, to, from, to, from, to);
   sendMaybeCsv(req, res, rows, `revenue-by-product-${from}-to-${to}`);
 });
 
@@ -215,15 +235,21 @@ router.get('/daily-trend', (req, res) => {
      WHERE won_date >= ? AND won_date <= ? AND status != 'cancelled' GROUP BY won_date`
   ).all(from, to);
   const collected = db.prepare(
-    `SELECT received_date AS day, SUM(amount_paise) / 100 AS collected_rupees FROM payments
+    `SELECT received_date AS day, SUM(amount_paise) AS collected_paise FROM payments
      WHERE received_date >= ? AND received_date <= ? GROUP BY received_date`
   ).all(from, to);
   const byDay = new Map();
   let d = from;
-  while (d <= to) { byDay.set(d, { day: d, dials: 0, connects: 0, deals: 0, collected_rupees: 0 }); d = addDays(d, 1); }
+  while (d <= to) {
+    byDay.set(d, { day: d, dials: 0, connects: 0, deals: 0, collected_rupees: 0, collected_paise: 0 });
+    d = addDays(d, 1);
+  }
   for (const r of calls) byDay.get(r.day) && Object.assign(byDay.get(r.day), { dials: r.dials, connects: r.connects });
   for (const r of deals) byDay.get(r.day) && (byDay.get(r.day).deals = r.deals);
-  for (const r of collected) byDay.get(r.day) && (byDay.get(r.day).collected_rupees = r.collected_rupees);
+  for (const r of collected) {
+    const row = byDay.get(r.day);
+    if (row) { row.collected_paise = r.collected_paise; row.collected_rupees = rupees(r.collected_paise); }
+  }
   res.json([...byDay.values()]);
 });
 
@@ -253,12 +279,14 @@ router.get('/summary', (req, res) => {
     `SELECT COUNT(*) AS n FROM follow_ups f JOIN leads l ON l.id = f.lead_id AND l.deleted_at IS NULL
      WHERE f.status = 'pending' AND f.due_at < ?`
   ).get(istDayBounds(today).endUtc).n;
-  const overdueInstallments = db.prepare(
-    `SELECT COUNT(*) AS n, COALESCE(SUM(i.amount_paise),0) AS amount FROM installments i
-     JOIN deals d ON d.id = i.deal_id AND d.status = 'active'
-     JOIN leads l ON l.id = d.lead_id AND l.deleted_at IS NULL
-     WHERE i.status IN ('pending','partial') AND i.due_date < ?`
-  ).get(today);
+  // Overdue money = what is still OWED on past-due installments (amount minus
+  // linked payments, minus the deal's unlinked payments applied FIFO), not the
+  // face value of every non-'paid' installment (SCALE-11 / README).
+  const overdueRows = loadOpenInstallments(db, { dueBefore: today });
+  const overdueInstallments = {
+    n: overdueRows.length,
+    amount: overdueRows.reduce((s, r) => s + r.due_paise, 0),
+  };
 
   res.json({
     today,

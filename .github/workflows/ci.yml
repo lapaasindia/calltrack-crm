@@ -5,40 +5,188 @@ on:
     branches: [main]
   pull_request:
 
+# The default GITHUB_TOKEN is read-only for every job; nothing here publishes.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The unit/client/audit/android jobs never launch Electron: skip the ~100 MB
+  # runtime download that `npm ci` would otherwise trigger. (Any non-empty
+  # value means "skip" — the smoke job resets it to "" to get the binary.)
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  # Actions are pinned to major tags for readability; pinning to commit SHAs
+  # (Dependabot keeps them fresh) is the follow-up noted in CHANGELOG.md.
+
 jobs:
   # Fast, headless, pure-Node: server logic + the desktop navigation/download
-  # libs (desktop/lib/*.test.js). No Electron, no display.
-  test:
-    name: Unit tests (Node)
+  # libs (desktop/lib/*.test.js). No Electron, no display. Runs on the current
+  # Maintenance LTS (22) and the Active LTS (24) so the 2027 Node 22 EOL is not a
+  # surprise.
+  unit:
+    name: Unit tests (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # Install-time scripts are a supply-chain surface (audit DEP-15): install
+      # with them off, then rebuild ONLY the native module the tests need.
+      - run: npm ci --ignore-scripts
+      - run: npm rebuild better-sqlite3
+      - run: node -e "require('better-sqlite3')"
+      - run: npm test
+
+  # Builds the web bundle from client/package-lock.json. `npm ci` fails when the
+  # client lockfile does not match client/package.json — exactly the drift that
+  # shipped a vulnerable xlsx for 11 weeks (audit DEP-1).
+  client:
+    name: Client build + lockfile sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm test
+          cache-dependency-path: client/package-lock.json
+      - run: npm --prefix client ci
+      - name: Client unit tests (vitest)
+        run: npm --prefix client run test --if-present
+      - run: npm --prefix client run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+          retention-days: 7
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm --prefix client ci
+      # The client's eslint flat config is being added; until it lands this
+      # step is a no-op rather than a red check.
+      - name: Client lint
+        if: hashFiles('client/eslint.config.js') != ''
+        run: npm --prefix client run lint
+      # Warns (does not fail) so a Dependabot bump is not red for a doc file;
+      # regenerate with `node scripts/third-party-notices.mjs` before release.
+      - name: Third-party notices are current
+        run: |
+          npm ci --ignore-scripts
+          node scripts/third-party-notices.mjs --check || echo "::warning::THIRD-PARTY-NOTICES.md is stale — run node scripts/third-party-notices.mjs and commit it"
+
+  # Runtime dependencies (what the server, desktop app and web bundle actually
+  # ship) must be free of high/critical advisories. Build tooling is reported
+  # but does not fail the build; an SBOM is attached for every run.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Runtime deps (root) — high+ fails
+        run: npm audit --omit=dev --audit-level=high
+      - name: Runtime deps (client bundle) — high+ fails
+        run: npm --prefix client audit --omit=dev --audit-level=high
+      - name: Full audit incl. build tooling (informational)
+        run: |
+          npm audit --audit-level=high || echo "::warning::root dev/build tooling has open advisories (see log)"
+          npm --prefix client audit --audit-level=high || echo "::warning::client dev/build tooling has open advisories (see log)"
+      - name: SBOM (CycloneDX, runtime deps)
+        run: |
+          npm sbom --sbom-format cyclonedx --omit dev --package-lock-only > sbom-server.cdx.json
+          npm --prefix client sbom --sbom-format cyclonedx --omit dev --package-lock-only > sbom-client.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-*.cdx.json
+          retention-days: 30
+
+  # Proves the tracked Android project still builds (audit DEP-6/DEP-11). JDK 17
+  # + Gradle 8.2.1 + AGP 8.2.1 is the frozen toolchain; bump to JDK 21 with the
+  # Capacitor 8 migration.
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci --ignore-scripts
+      - run: npx cap sync android
+      # The generated plugin wiring is committed; if `cap sync` changes it, the
+      # commit is missing a step.
+      - run: git diff --exit-code -- mobile/android/capacitor.settings.gradle mobile/android/app/capacitor.build.gradle
+      - run: ./gradlew assembleDebug --no-daemon
+        working-directory: mobile/android
+      - name: Inspect the APK (version, package, signing)
+        run: node scripts/publish-apk.js mobile/android/app/build/outputs/apk/debug/app-debug.apk --out "$RUNNER_TEMP/apk-check" --dry-run --allow-debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
 
   # Proves the report-CSV download path works in the REAL Electron shell on
-  # each OS the app ships to. Launches the app, triggers the actual client
-  # fetch->Blob->a[download].click() download, asserts a file lands. Opt-in
-  # (test:desktop), kept out of the fast job because it needs an Electron binary.
+  # each OS the app ships to (scripts/desktop-smoke.mjs). Needs the Electron
+  # binary, so the skip flag is cleared and the download cached.
   desktop-smoke:
     name: Desktop smoke (${{ matrix.os }})
-    needs: test
+    needs: [unit, client]
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: ""
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
+      - run: npx electron --version
       - run: npm run test:desktop
         timeout-minutes: 5

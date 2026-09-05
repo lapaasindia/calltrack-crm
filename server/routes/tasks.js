@@ -273,29 +273,40 @@ router.delete('/:id', (req, res) => {
 
 // ===================== TIME TRACKING =====================
 
-// Start: records intent + moves a To Do task into Doing. The single active
-// timer is enforced client-side; the server just stamps a start instant.
+// Start: persists the start instant SERVER-SIDE (tasks.timer_started_at) and
+// moves a To Do task into Doing. Idempotent: starting an already-running timer
+// keeps the original start (SCALE-22). `started` in the response is what the
+// client should display elapsed time from.
 router.post('/:id/timer/start', (req, res) => {
   const task = loadTask(req, res);
   if (!task) return undefined;
-  const started = nowUtc();
+  const alreadyRunning = !!task.timer_started_at;
+  const started = task.timer_started_at || nowUtc();
   const board = task.board_status === 'To Do' ? 'Doing' : task.board_status;
   const status = legacyStatusFor(board);
-  db.prepare('UPDATE tasks SET board_status = ?, status = ? WHERE id = ?').run(board, status, task.id);
-  return res.json({ ok: true, started, board_status: board });
+  db.prepare('UPDATE tasks SET board_status = ?, status = ?, timer_started_at = ? WHERE id = ?')
+    .run(board, status, started, task.id);
+  return res.json({ ok: true, started, board_status: board, already_running: alreadyRunning });
 });
 
-// Stop: compute duration from {start_iso} to now, append a time_entry and bump
-// time_tracked. Non-positive durations are ignored (clock skew / instant stop).
+// Stop: duration is computed from the server-side start (a client-supplied
+// start_iso is ignored — it could claim any interval), appended as a
+// time_entry, and the start is cleared, so a double-click/retry is a no-op
+// instead of a second entry. Stopping a timer that isn't running returns
+// duration 0.
 router.post('/:id/timer/stop', (req, res) => {
   const task = loadTask(req, res);
   if (!task) return undefined;
-  const startIso = req.body?.start_iso;
-  const start = startIso ? Date.parse(startIso) : NaN;
-  if (Number.isNaN(start)) return res.status(400).json({ error: 'start_iso required' });
+  if (!task.timer_started_at) {
+    return res.json({ ok: true, duration: 0, time_tracked: task.time_tracked || 0, running: false });
+  }
+  const start = Date.parse(task.timer_started_at);
   const end = Date.now();
-  const duration = Math.floor((end - start) / 1000);
-  if (duration <= 0) return res.json({ ok: true, duration: 0, time_tracked: task.time_tracked });
+  const duration = Number.isNaN(start) ? 0 : Math.floor((end - start) / 1000);
+  if (duration <= 0) {
+    db.prepare('UPDATE tasks SET timer_started_at = NULL WHERE id = ?').run(task.id);
+    return res.json({ ok: true, duration: 0, time_tracked: task.time_tracked || 0, running: false });
+  }
 
   const entries = safeJsonArray(task.time_entries);
   entries.push({
@@ -306,9 +317,9 @@ router.post('/:id/timer/stop', (req, res) => {
     date: todayIst(),
   });
   const total = (task.time_tracked || 0) + duration;
-  db.prepare('UPDATE tasks SET time_entries = ?, time_tracked = ? WHERE id = ?')
+  db.prepare('UPDATE tasks SET time_entries = ?, time_tracked = ?, timer_started_at = NULL WHERE id = ?')
     .run(JSON.stringify(entries), total, task.id);
-  return res.json({ ok: true, duration, time_tracked: total });
+  return res.json({ ok: true, duration, time_tracked: total, running: false });
 });
 
 // Manual entry: append a synthetic time_entry of {minutes} and bump the total.

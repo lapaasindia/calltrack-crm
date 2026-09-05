@@ -98,9 +98,20 @@ test('manager authorizes as admin tier; read_only blocked from owner writes', as
   assert.equal(mgrAudit.status, 403);
 
   const roCookie = await loginCookie('viewer1', 'secret99');
-  // read_only cannot manage team (requireAdmin).
+  // read_only cannot manage team (requireAdmin on every write)...
+  const roCreate = await api('/api/users', {
+    method: 'POST', cookie: roCookie,
+    body: { username: 'nope', full_name: 'Nope', password: 'secret99', role: 'caller' },
+  });
+  assert.equal(roCreate.status, 403);
+  // ...but gets the slim directory ({id, full_name, role} of active users) that
+  // attendee/assignee pickers need (CLIENT-29) — no usernames or targets.
   const roUsers = await api('/api/users', { cookie: roCookie });
-  assert.equal(roUsers.status, 403);
+  assert.equal(roUsers.status, 200);
+  assert.ok(Array.isArray(roUsers.data) && roUsers.data.length >= 1);
+  for (const u of roUsers.data) {
+    assert.deepEqual(Object.keys(u).sort(), ['full_name', 'id', 'role']);
+  }
 });
 
 test('audit: a row is written on successful login and visible to owner', async () => {

@@ -44,14 +44,26 @@ logging** (every call attaches to leads) — just no audio/transcript.
 4. **Open the app**, tap **Scan pairing QR**.
 5. On the office computer, open CallTrack → **Settings → Paired phones → Pair
    phone** → pick the caller's name → a QR appears. Scan it.
-6. **Grant the permissions** the app's setup screen asks for:
+6. **Confirm the server** — the app shows "Pair this phone with 192.168.x.x:3000?"
+   Only tap OK if that is your office computer (it refuses anything that is not
+   a LAN address).
+7. **Grant the permissions** the app's setup screen asks for:
    - **Call log** — tap Allow
-   - **All files access / Recordings** — toggle it on (needed to read recordings)
+   - **Audio access** — tap Allow (lets the app find the dialer's recordings)
+   - **Recordings folder** — tap Choose and pick the folder your Phone app
+     saves call recordings in (e.g. `Recordings/Call`). The app refuses the
+     whole "Internal storage" root and only uploads files whose folder or name
+     looks like a call recording — songs and voice notes are never uploaded.
    - **Battery: no restrictions** — so syncing keeps working in the background
-   - **Auto-start** — see the per-brand steps below
+   - **Auto-start** — see the per-brand steps below (shown as "Not needed on
+     this phone" where the brand has no such screen)
 
-That's it — calls start syncing. The app syncs every time it's opened, plus
-periodically in the background.
+That's it — calls start syncing. The app syncs right after pairing, every time
+it's opened, a few seconds after each call ends (background service) and every
+15 minutes. The sync chip at the top is **green only after a successful sync**;
+if it turns red, tap it — the error is shown as a message and under
+**Settings → Last error**. Only calls made **after pairing** are synced (never
+more than the last 30 days if the phone was offline for long).
 
 ---
 
@@ -114,14 +126,21 @@ Runs entirely offline.
 - All recordings and transcripts stay on the office computer. Audio is kept for
   90 days by default (configurable), then deleted — transcripts stay.
 - A phone's access can be cut instantly: CallTrack → Settings → Paired phones →
-  Disconnect. The phone stops syncing immediately.
+  Disconnect. The phone stops syncing immediately, its background service
+  stops, and the app drops back to the pairing screen with "This phone was
+  disconnected or the pairing expired — scan the QR again". Pairings also
+  expire after 90 days (one QR scan to renew).
+- The device token is stored on the phone in the Android Keystore-backed
+  encrypted store (never in the web layer's storage).
 - Passwords/tokens travel over your office WiFi in plain form — keep the WiFi
   WPA2-protected, as with the rest of CallTrack.
 
 ## Updating the app
 
-When a new version is published, callers get a prompt on app open (or check
-manually: Settings → Check for app update). Two taps to update.
+When a new version is published, the app checks once a day on open and offers
+the download (or check manually: Settings → Check for app update). The APK is
+downloaded by the phone's browser — tap the finished download to install it
+over the old version.
 
 ## Building & publishing the APK (admin/dev)
 
@@ -130,14 +149,20 @@ manually: Settings → Check for app update). Two taps to update.
 keytool -genkeypair -keystore calltrack-release.keystore -alias calltrack \
   -keyalg RSA -keysize 2048 -validity 10000
 
-# build a signed release APK
+# the version comes from the root package.json (versionName = its "version",
+# versionCode = major*10000 + minor*100 + patch, e.g. 1.2.2 → 10202) — bump
+# package.json, never build.gradle
+npx cap sync android
 cd mobile/android
 CALLTRACK_KEYSTORE=/path/to/calltrack-release.keystore \
 CALLTRACK_KEYSTORE_PASS=yourpass \
-  ./gradlew assembleRelease
+JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
+  ./gradlew assembleRelease --no-daemon
+# (assembleRelease refuses to run without CALLTRACK_KEYSTORE — an unsigned APK is useless)
 
 # publish it to the office server so phones can download/update
-node scripts/publish-apk.js mobile/android/app/build/outputs/apk/release/app-release.apk <versionCode> <versionName>
+cd ../..
+node scripts/publish-apk.js mobile/android/app/build/outputs/apk/release/app-release.apk 10202 1.2.2
 ```
 
 > ⚠️ **Keep the keystore + password forever.** Updates must be signed with the

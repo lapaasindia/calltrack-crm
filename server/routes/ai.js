@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import db, { getSetting, setSetting } from '../db.js';
-import { requireAdmin, canAccessLead } from '../middleware/auth.js';
+import { requireAdmin, requireWriter, canAccessLead } from '../middleware/auth.js';
 import { isOwner, isReadOnly, canSeeAllLeads } from '../lib/permissions.js';
 import { openSecret } from '../lib/secretBox.js';
 import { nowUtc } from '../lib/istTime.js';
@@ -70,7 +70,7 @@ function loadSuggestion(req, res) {
 }
 
 // Accept = apply the change AND mark accepted, atomically.
-router.post('/suggestions/:id/accept', (req, res) => {
+router.post('/suggestions/:id/accept', requireWriter, (req, res) => {
   const ctx = loadSuggestion(req, res);
   if (!ctx) return;
   const { s, lead } = ctx;
@@ -108,7 +108,7 @@ router.post('/suggestions/:id/accept', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/suggestions/:id/dismiss', (req, res) => {
+router.post('/suggestions/:id/dismiss', requireWriter, (req, res) => {
   const ctx = loadSuggestion(req, res);
   if (!ctx) return;
   db.prepare("UPDATE ai_suggestions SET status = 'dismissed', acted_by = ?, acted_at = ? WHERE id = ?")
@@ -164,7 +164,19 @@ export function recordingsRouter({
     ).run(result.transcript || '', result.translation || null, rec.id);
 
     // Re-run extraction → suggestions + derived lead AI fields on the new text.
-    const analysis = await analyzeFn(rec.id, result.transcript || result.translation || '');
+    // Guarded: an unhandled rejection here would take the whole Node 22
+    // process down (audit SEC-8). The transcript is already stored, so report
+    // the analysis failure as a 500 and let the AI worker retry later.
+    let analysis;
+    try {
+      analysis = await analyzeFn(rec.id, result.transcript || result.translation || '');
+    } catch (err) {
+      console.error('[ai] analyze after cloud transcription failed:', err);
+      return res.status(500).json({
+        error: `Transcript stored, but analysis failed: ${err?.message || 'unknown error'}`,
+        transcript_stored: true,
+      });
+    }
 
     res.json({
       ok: true,

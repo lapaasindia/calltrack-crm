@@ -4,17 +4,25 @@
 import { Router } from 'express';
 import path from 'node:path';
 import db from '../db.js';
-import { canAccessLead } from '../middleware/auth.js';
+import { canAccessLead, requireWriter } from '../middleware/auth.js';
 import { signMediaTicket } from '../lib/mediaTicket.js';
 import { nowUtc } from '../lib/istTime.js';
-import { findLeadCandidates } from '../lib/leadMatch.js';
+import { findLeadCandidatesBatch } from '../lib/leadMatch.js';
+import { recalcLeadScore } from '../lib/scoring.js';
+import { isAdmin, canSeeAllLeads } from '../lib/permissions.js';
 import { CALL_TYPES, OUTCOMES } from './calls.js';
 import { RECORDINGS_BASE } from './sync.js';
 
 const router = Router();
+router.use(requireWriter);
 
+// Admin tier (super_admin/admin/manager) reviews the whole team's queues;
+// everyone else only their own captures/recordings/calls (SCALE-9: this used
+// to test the literal 'admin', downgrading super_admin and manager).
+const seesAll = (req) => canSeeAllLeads(req.user.role);
 const scope = (req, col = 'user_id') =>
-  req.user.role === 'admin' ? { clause: '', params: [] } : { clause: `AND ${col} = ?`, params: [req.user.id] };
+  seesAll(req) ? { clause: '', params: [] } : { clause: `AND ${col} = ?`, params: [req.user.id] };
+const ownsRow = (req, row) => seesAll(req) || row.user_id === req.user.id;
 
 // Move every pending captured call from `phone` onto `leadId` as real
 // (auto-logged) call rows — dedup-safe via idx_calls_mobile_dedupe — and relink
@@ -78,17 +86,17 @@ router.get('/captured', (req, res) => {
      ORDER BY c.call_log_ts DESC LIMIT 200`
   ).all(...s.params);
   // Surface existing leads this number may belong to, so the reviewer can
-  // attach to the existing lead instead of creating a duplicate.
-  for (const r of rows) r.lead_candidates = findLeadCandidates(r.phone, req.user);
+  // attach to the existing lead instead of creating a duplicate. One query for
+  // the whole page (SCALE-15), not one LIKE scan per row.
+  const candidates = findLeadCandidatesBatch(rows.map((r) => r.phone), req.user);
+  for (const r of rows) r.lead_candidates = candidates.get(r.phone) || [];
   res.json(rows);
 });
 
 router.post('/captured/:id/create-lead', (req, res) => {
   const captured = db.prepare('SELECT * FROM captured_calls WHERE id = ?').get(req.params.id);
   if (!captured || captured.status !== 'pending') return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'admin' && captured.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your captured call' });
-  }
+  if (!ownsRow(req, captured)) return res.status(403).json({ error: 'Not your captured call' });
   const name = String(req.body.name || '').trim() || `Unknown ${captured.phone}`;
 
   const leadId = db.transaction(() => {
@@ -103,6 +111,9 @@ router.post('/captured/:id/create-lead', (req, res) => {
       lead = { id: info.lastInsertRowid };
     }
     mergeCapturedIntoLead(lead.id, captured.phone);
+    // Score the (possibly brand-new) lead now that its calls are attached, so
+    // it is never left at score NULL (SCALE-10).
+    recalcLeadScore(db, lead.id);
     return lead.id;
   })();
 
@@ -114,9 +125,7 @@ router.post('/captured/:id/create-lead', (req, res) => {
 router.post('/captured/:id/attach-existing', (req, res) => {
   const captured = db.prepare('SELECT * FROM captured_calls WHERE id = ?').get(req.params.id);
   if (!captured || captured.status !== 'pending') return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'admin' && captured.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your captured call' });
-  }
+  if (!ownsRow(req, captured)) return res.status(403).json({ error: 'Not your captured call' });
   const lead = db.prepare('SELECT * FROM leads WHERE id = ? AND deleted_at IS NULL')
     .get(Number(req.body.lead_id));
   if (!lead) return res.status(400).json({ error: 'Lead not found' });
@@ -131,6 +140,7 @@ router.post('/captured/:id/attach-existing', (req, res) => {
 
   db.transaction(() => {
     mergeCapturedIntoLead(lead.id, captured.phone);
+    recalcLeadScore(db, lead.id);
     if (asFollowUp) {
       // One pending follow-up per lead (idx_followups_one_pending): replace it.
       db.prepare("UPDATE follow_ups SET status = 'cancelled' WHERE lead_id = ? AND status = 'pending'")
@@ -148,19 +158,27 @@ router.post('/captured/:id/attach-existing', (req, res) => {
 router.post('/captured/:id/ignore', (req, res) => {
   const captured = db.prepare('SELECT * FROM captured_calls WHERE id = ?').get(req.params.id);
   if (!captured || captured.status !== 'pending') return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'admin' && captured.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your captured call' });
-  }
+  if (!ownsRow(req, captured)) return res.status(403).json({ error: 'Not your captured call' });
+  // "Ignore always" writes to the TEAM-WIDE ignored_numbers list, which
+  // suppresses the number from ever being captured again on any device — so
+  // it is admin-tier only (audit SEC-10). Others get the per-capture ignore
+  // (status change) and a flag saying the block was not applied, instead of a
+  // 403 that would break older APKs' ignore flow.
+  const always = !!req.body.always && isAdmin(req.user.role);
   db.transaction(() => {
     db.prepare("UPDATE captured_calls SET status = 'ignored' WHERE phone = ? AND status = 'pending'")
       .run(captured.phone);
-    if (req.body.always) {
+    if (always) {
       db.prepare(
         'INSERT INTO ignored_numbers (phone, added_by, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
       ).run(captured.phone, req.user.id, nowUtc());
     }
   })();
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    always,
+    ...(req.body.always && !always ? { note: 'Only an admin can block a number for the whole team' } : {}),
+  });
 });
 
 // ---------- recordings needing manual placement ----------
@@ -200,9 +218,7 @@ router.get('/recordings', (req, res) => {
 router.post('/recordings/:id/attach', (req, res) => {
   const rec = db.prepare('SELECT * FROM recordings WHERE id = ?').get(req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
-  if (req.user.role !== 'admin' && rec.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your recording' });
-  }
+  if (!ownsRow(req, rec)) return res.status(403).json({ error: 'Not your recording' });
   if (req.body.call_id) {
     const call = db.prepare('SELECT id, user_id FROM calls WHERE id = ?').get(Number(req.body.call_id));
     if (!call) return res.status(400).json({ error: 'Invalid call' });
@@ -239,9 +255,7 @@ router.get('/untagged', (req, res) => {
 router.patch('/calls/:id', (req, res) => {
   const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(req.params.id);
   if (!call || !call.auto_logged) return res.status(404).json({ error: 'Call not found' });
-  if (req.user.role !== 'admin' && call.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your call' });
-  }
+  if (!ownsRow(req, call)) return res.status(403).json({ error: 'Not your call' });
   const callType = CALL_TYPES.includes(req.body.call_type) ? req.body.call_type : call.call_type;
   let outcome = call.outcome;
   if (req.body.outcome !== undefined) {
@@ -258,7 +272,7 @@ router.patch('/calls/:id', (req, res) => {
 // ---------- audio streaming (browser + app) ----------
 // Access: your own upload, admin, or anyone who can access the linked lead.
 function canAccessRecording(user, rec) {
-  if (user.role === 'admin' || rec.user_id === user.id) return true;
+  if (canSeeAllLeads(user.role) || rec.user_id === user.id) return true;
   if (rec.call_id) {
     const lead = db.prepare(
       'SELECT l.* FROM leads l JOIN calls c ON c.lead_id = l.id WHERE c.id = ?'
