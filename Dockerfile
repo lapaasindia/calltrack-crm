@@ -5,7 +5,8 @@
 #   stage 1  builds the React client (needs the root package.json: the version
 #            is baked into the bundle as __APP_VERSION__)
 #   stage 2  the lean runtime: Node 22, ffmpeg (recording transcoding — the
-#            optional whisper.cpp AI binary is NOT included), tini (PID 1 that
+#            optional whisper.cpp AI binary is NOT included), curl (Coolify's
+#            health probe runs it inside the container), tini (PID 1 that
 #            forwards SIGTERM so `docker stop` runs the graceful shutdown),
 #            production npm deps only, server + built client. All state lives
 #            in /data (mount a volume); the process runs as the unprivileged
@@ -31,7 +32,7 @@ RUN npm --prefix client run build
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS runtime
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
