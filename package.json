@@ -31,7 +31,7 @@
     "baileys": "~6.7.24",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^13.0.3",
-    "express": "^4.21.2",
+    "express": "^5.2.1",
     "express-session": "^1.18.1",
     "multer": "^2.3.0",
     "pino": "^9.14.0",
