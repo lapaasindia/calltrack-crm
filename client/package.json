@@ -12,7 +12,7 @@
     "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {
-    "papaparse": "^5.5.2",
+    "papaparse": "^5.7.0",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
